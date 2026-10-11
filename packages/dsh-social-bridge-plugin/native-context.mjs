@@ -1,3 +1,4 @@
+import { activeReaderAccount } from '../../scripts/reader-account-state.mjs';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -14,7 +15,7 @@ const {contextPolicy,contextRowsIdle,contextBufferVersion}=await import(new URL(
 export const name = 'dsh-social-bridge-plugin';
 export const inject = ['agents', 'sessions', 'agentPresets', 'tokenMeter'];
 const KEY = /^(qq|wechat):(private|group):.{1,256}$/;
-const sidFor = (key,generation=0) => 'social-' + crypto.createHash('sha256').update(generation ? `${key}\0${generation}` : key).digest('hex').slice(0,32);
+const sidFor = (key,generation=0,scope='') => 'social-' + crypto.createHash('sha256').update((scope ? scope+'\0' : '')+(generation ? `${key}\0${generation}` : key)).digest('hex').slice(0,32);
 const hash = text => crypto.createHash('sha256').update(text).digest('hex');
 const COHERENCE_POLICY = 'single-persona-v1';
 const clean = (text, limit=60) => String(text ?? '').replace(/[\u0000-\u001f\u007f]/g,' ').replace(/\s+/g,' ').trim().slice(0,limit);
@@ -73,12 +74,16 @@ function initialization(profile, compactSeq) {
 
 export function apply(ctx, config={}) {
   const root = config.projectRoot ? path.resolve(config.projectRoot) : path.resolve(import.meta.dirname,'..','..');
+  const loadedAccount = activeReaderAccount(root);
+  const accountReady = () => activeReaderAccount(root).id === loadedAccount.id;
+  const sidScope = loadedAccount.id && loadedAccount.id !== loadedAccount.legacyId ? loadedAccount.id : '';
+  const accountSidFor = (key,generation=0) => sidFor(key,generation,sidScope);
   const tokenFile = config.tokenFile ?? process.env.SOCIAL_DSH_TOKEN_FILE ?? path.join(root,'state/social-dsh-token.txt');
   const token = process.env.SOCIAL_DSH_TOKEN || fs.readFileSync(tokenFile,'utf8').trim();
   const port = Number(config.port ?? 11230), host = config.host ?? '127.0.0.1';
   const provider = config.provider ?? '', model = config.model ?? '', preset = config.agentPreset ?? 'wechat-social';
   if (!token || !provider || !model || !Number.isSafeInteger(port) || port<1 || port>65535 || !['127.0.0.1','localhost','::1'].includes(host)) throw new Error('Invalid DSH bridge configuration');
-  const statePath = path.resolve(config.statePath ?? path.join(process.env.DSH_HOME ?? path.join(os.homedir(),'.dsh'),'dsh-social-bridge/sessions.json'));
+  const statePath = sidScope ? path.join(root,'state/accounts',sidScope,'dsh-sessions.json') : path.resolve(config.statePath ?? path.join(process.env.DSH_HOME ?? path.join(os.homedir(),'.dsh'),'dsh-social-bridge/sessions.json'));
   const log = ctx.logger(name), handles = new Map(), startup = new Map(), pending = new Map(), turns = new Map(), operations = new Map(), staged = new Set();
   let mappings = {}, profiles = {};
   if (fs.existsSync(statePath)) {
@@ -89,7 +94,7 @@ export function apply(ctx, config={}) {
   }
   for (const [key,sid] of Object.entries(mappings)) {
     const generation=profiles[key]?.generation ?? 0;
-    if(!KEY.test(key) || !Number.isSafeInteger(generation) || generation<0 || generation>1000000 || sid!==sidFor(key,generation))throw new Error('Invalid social session identity');
+    if(!KEY.test(key) || !Number.isSafeInteger(generation) || generation<0 || generation>1000000 || sid!==accountSidFor(key,generation))throw new Error('Invalid social session identity');
   }
   const keyFor = sid => Object.keys(mappings).find(key => mappings[key]===sid);
   const persist = () => {
@@ -167,11 +172,11 @@ export function apply(ctx, config={}) {
     if(selected?.id!==preset)throw new Error('Required safe preset unavailable');
     const previousSid=mappings[key], previousGeneration=profiles[key]?.generation ?? 0;
     const archived=new Set(ctx.get?.('workspaceRegistry')?.archivedSessionIds ?? []);
-    let generation=previousGeneration, sid=previousSid ?? sidFor(key,generation);
+    let generation=previousGeneration, sid=previousSid ?? accountSidFor(key,generation);
     const rotating=archived.has(sid);
     if(rotating){
       if(pending.has(sid))throw new Error('session_busy');
-      do{if(++generation>1000000)throw new Error('Session generation limit reached');sid=sidFor(key,generation);}while(archived.has(sid));
+      do{if(++generation>1000000)throw new Error('Session generation limit reached');sid=accountSidFor(key,generation);}while(archived.has(sid));
     }
     const live=ctx.agents.get(sid);
     if(live){
@@ -298,7 +303,8 @@ export function apply(ctx, config={}) {
     const reply=(code,body)=>{if(!res.destroyed){res.writeHead(code,{'content-type':'application/json; charset=utf-8'});res.end(JSON.stringify(body));}};
     const supplied=Buffer.from(String(req.headers.authorization ?? '').replace(/^Bearer /i,'')), expected=Buffer.from(token);
     if(supplied.length!==expected.length || !crypto.timingSafeEqual(supplied,expected))return reply(401,{error:'unauthorized'});
-    if(req.method==='GET' && req.url==='/health')return reply(200,{ok:true,messageSource:'wechat-social-bridge',project:'WeChatAgent',projectRoot:root,contextMode:'native-session-v1',contextMaintenance:'idle-threshold-v1',sessionNaming:true,imageInput:'native-attachment-v1',imageOffloadMode:'after-turn-v1',sessionLifecycle:'archive-rotation-v1',turnRecovery:'cancel-on-timeout-v1',searchBudget:'per-turn-count-v1',searchReasoning:'model-default-v1',toolIsolation:SOCIAL_TOOL_ISOLATION,pendingTurns:pending.size,behaviorPolicy:BEHAVIOR_POLICY,coherencePolicy:COHERENCE_POLICY});
+    if(req.method==='GET' && req.url==='/health')return reply(200,{ok:accountReady(),accountScope:loadedAccount.id,messageSource:'wechat-social-bridge',project:'WeChatAgent',projectRoot:root,contextMode:'native-session-v1',contextMaintenance:'idle-threshold-v1',sessionNaming:true,imageInput:'native-attachment-v1',imageOffloadMode:'after-turn-v1',sessionLifecycle:'archive-rotation-v1',turnRecovery:'cancel-on-timeout-v1',searchBudget:'per-turn-count-v1',searchReasoning:'model-default-v1',toolIsolation:SOCIAL_TOOL_ISOLATION,pendingTurns:pending.size,behaviorPolicy:BEHAVIOR_POLICY,coherencePolicy:COHERENCE_POLICY});
+    if(!accountReady())return reply(409,{error:'account_changed',detail:'ACCOUNT_SWITCH_REQUIRES_DSH_RESTART'});
     if(req.method==='GET' && req.url==='/sessions')return reply(200,{sessions:Object.entries(mappings).map(([key,sid])=>({conversationKey:key,sessionId:sid,title:profiles[key]?.title ?? sessionTitle(key),initializations:profiles[key]?.initializations ?? 0,compactions:profiles[key]?.compactions ?? 0,generation:profiles[key]?.generation ?? 0,previousSessionCount:profiles[key]?.previousSessions?.length ?? 0,...contextStatus(key,sid),contextAuto:profiles[key]?.contextAuto ? {status:profiles[key].contextAuto.status,finishedAt:profiles[key].contextAuto.finishedAt,retryAt:profiles[key].contextAuto.retryAt} : null}))});
     if(req.method!=='POST' || !['/followup','/configure','/compact','/context-maintenance'].includes(req.url))return reply(404,{error:'not_found'});
     try{

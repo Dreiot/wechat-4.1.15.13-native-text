@@ -395,12 +395,18 @@ async function pollJob() {
         state.reader = await api('/api/reader-config');
         state.readerDraft = { dbPath: state.reader.dbPath, myWxid: state.reader.myWxid, decryptKey: '' };
         state.readerError = '';
+        if (state.job.accountSwitched) {
+          const updated = await api('/api/config');
+          state.config = updated.config; state.draft = structuredClone(updated.config); state.revision = updated.revision;
+          state.names.clear();
+          toast('账号已切换。请完整重开 DSH 后启动服务；新账号需要选择自己的聊天范围。');
+        }
         if (state.deployment) { state.deployment.configured = state.reader.verified; $('#setup-banner').hidden = state.reader.verified; }
       } else if (state.job.state === 'failed') state.readerError = state.job.message;
       if (['setup', 'connections'].includes(state.page)) await renderPage();
     }
     await refreshStatus();
-    if ($('#job-panel').hidden && state.job) toast((actions[state.job.action]?.[0] ?? '操作') + (state.job.state === 'succeeded' ? '已完成。' : '未完成，点击右上角操作记录查看原因。'));
+    if ($('#job-panel').hidden && state.job && !state.job.accountSwitched) toast((actions[state.job.action]?.[0] ?? '操作') + (state.job.state === 'succeeded' ? '已完成。' : '未完成，点击右上角操作记录查看原因。'));
     if (state.job?.state === 'succeeded' && state.page === 'sessions') await renderPage();
   } catch (error) { showError('操作状态暂时无法获取：' + error.message + '。正在通过运行状态重新检查，请勿重复执行。'); }
   finally { jobPolling = false; paintReaderSetup(); }
@@ -444,7 +450,7 @@ async function discoverReader(automatic) {
 async function saveReader(autoKey = false) {
   if (configDirty() || state.roleDrafts.size) { toast('请先保存其他设置，再连接微信。'); return; }
   try {
-    await persistReader(autoKey); updateDraftUI(); toast('数据库已验证并安全保存，重启服务后生效。');
+    await persistReader(autoKey); updateDraftUI(); toast('正在连接并验证所选账号，请查看操作记录。');
   } catch (error) { state.readerError = error.message; paintReaderSetup(); }
 }
 async function persistReader(autoKey = true) {
@@ -555,7 +561,7 @@ if (window.desktop) {
   document.body.classList.add('desktop-mode');
   $('.brand span').textContent = '桌面应用';
   $('.breadcrumb > span:first-of-type').textContent = 'WeChatAgent';
-  $('.version').textContent = '0.2.2 · 关闭窗口收起到托盘';
+  $('.version').textContent = '0.3.0 · 关闭窗口收起到托盘';
   $('#quit-console').textContent = '退出应用';
 }
 document.addEventListener('click', event => { if (document.body.classList.contains('nav-open') && !event.target.closest('.sidebar') && !event.target.closest('#menu-button')) document.body.classList.remove('nav-open'); });

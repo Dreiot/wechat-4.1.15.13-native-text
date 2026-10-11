@@ -44,6 +44,7 @@ export function runConsoleCommand(spec, onOutput, { cwd, env = process.env, time
 }
 
 export function taskFailureMessage(output, code) {
+  if (/ACCOUNT_SWITCH_REQUIRES_DSH_RESTART/.test(output)) return '账号已切换。请从 DSH 托盘完整退出并重新打开，再启动助手服务。';
   if (code === 124) return '操作等待超时。请查看连接检查与日志，确认当前服务状态后重试。';
   if (/ModuleNotFoundError|ImportError|DLL load failed|需要 sqlcipher3/i.test(output)) return '读取组件缺失或无法加载。请重新安装更新后的安装包，然后在首次配置中点击“验证内置环境”。';
   if (/Selected account database directory is unavailable/i.test(output)) return '找不到所选账号的数据库目录。请在首次配置中自动查找账号，或重新选择包含 db_storage 的账号文件夹。';

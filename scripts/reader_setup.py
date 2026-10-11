@@ -136,6 +136,27 @@ def verify_database(account, key):
             raise SetupError('READER_DATABASE_UNREADABLE') from None
 
 
+def main_process_pids(matches, parents):
+    """Count client process trees, not same-executable renderer/helper children."""
+    matching = set(matches)
+    roots = []
+    for pid in dict.fromkeys(matches):
+        ancestor = parents.get(pid, 0)
+        seen = {pid}
+        nested = False
+        while ancestor:
+            if ancestor in seen:
+                raise SetupError('WECHAT_PROCESS_IDENTITY_UNCLEAR')
+            if ancestor in matching:
+                nested = True
+                break
+            seen.add(ancestor)
+            ancestor = parents.get(ancestor, 0)
+        if not nested:
+            roots.append(pid)
+    return roots
+
+
 def wechat_pids(executable):
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
     class ProcessEntry(ctypes.Structure):
@@ -156,11 +177,12 @@ def wechat_pids(executable):
     snapshot = kernel.CreateToolhelp32Snapshot(2, 0)
     if snapshot == ctypes.c_void_p(-1).value:
         raise SetupError('READER_KEY_ACCESS_DENIED')
-    matches, denied = [], False
+    matches, parents, denied = [], {}, False
     try:
         entry = ProcessEntry(); entry.dwSize = ctypes.sizeof(entry)
         exists = kernel.Process32FirstW(snapshot, ctypes.byref(entry))
         while exists:
+            parents[entry.th32ProcessID] = entry.th32ParentProcessID
             if entry.szExeFile.casefold() == pathlib.Path(executable).name.casefold():
                 process = kernel.OpenProcess(0x1000, False, entry.th32ProcessID)
                 if process:
@@ -178,7 +200,7 @@ def wechat_pids(executable):
         kernel.CloseHandle(snapshot)
     if not matches and denied:
         raise SetupError('READER_KEY_ACCESS_DENIED')
-    return matches
+    return main_process_pids(matches, parents)
 
 
 def capture_key(executable, account, timeout=180, clock=time.monotonic, sleep=time.sleep, pids=wechat_pids, library=None):

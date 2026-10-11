@@ -58,7 +58,7 @@ const presetNames = fs.readdirSync(path.join(root, 'roles')).filter(name => name
 for (const name of presetNames) add('roles/' + name);
 addTree('public/console');
 const scriptNames = ['project-config.mjs','migrate-io-config.mjs','manage.ps1','console-server.mjs','console-process.mjs','console-powershell.ps1','console-native.ps1','sync-weflow.cjs','hook-onebot.mjs','reader-api.py','reader-requirements.txt','wechat_media.py','wechat_sticker.py','wechat_sticker_send.py','wechat_forwarded.py','resolve-wechat-image.py','list-friend-ids.mjs','manage-dsh-sessions.mjs','launch-hook-wechat.ps1','pin-hook-client.ps1','launch-dsh.ps1','check-runtime.ps1','setup.ps1','build-hook.ps1'];
-for (const name of [...scriptNames, 'check-runtime.py', 'wechat_sticker_labels.py', 'wechat_quote.py', 'text-delivery-store.mjs', 'reader-setup.mjs', 'reader_setup.py']) add('scripts/' + name);
+for (const name of [...scriptNames, 'check-runtime.py', 'wechat_sticker_labels.py', 'wechat_quote.py', 'text-delivery-store.mjs', 'reader-setup.mjs', 'reader_setup.py', 'reader-account-state.mjs']) add('scripts/' + name);
 addTree('scripts/native-hook');
 for (const name of ['nt_decrypt.py','nt_common.py']) add('components/weflow-cli/scripts/' + name);
 add('components/weflow-cli/LICENSE');

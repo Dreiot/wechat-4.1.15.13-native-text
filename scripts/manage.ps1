@@ -14,11 +14,15 @@ function Test-Port([int]$Port) {
     try { $task = $client.ConnectAsync('127.0.0.1',$Port); return ($task.Wait(700) -and $client.Connected) }
     catch { return $false } finally { $client.Dispose() }
 }
-function Owned-Process($Item) {
+function Owned-Process($Item,[switch]$AllowStale) {
     if (-not $Item) { return $null }
     $process = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $Item.pid)
     if (-not $process) { return $null }
-    if ($process.ExecutablePath -ne $Item.exe -or $process.CommandLine.IndexOf($Item.marker,[StringComparison]::OrdinalIgnoreCase) -lt 0) { throw 'Recorded PID no longer belongs to WeChatAgent; refusing to stop it.' }
+    if (-not $process.ExecutablePath -or -not $process.CommandLine) { throw 'Cannot verify recorded process identity; refusing to stop it.' }
+    if ($process.ExecutablePath -ne $Item.exe -or $process.CommandLine.IndexOf($Item.marker,[StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        if ($AllowStale) { Write-Host 'Discarded a stale service process record; unrelated process was not stopped.'; return $null }
+        throw 'Recorded PID no longer belongs to WeChatAgent; refusing to stop it.'
+    }
     return $process
 }
 function Stop-Services {
@@ -32,7 +36,7 @@ function Stop-Services {
         if ($name -eq 'weflow' -and $externalWeFlow) { continue }
         if ($script:record.ContainsKey($name)) {
             $item = $script:record[$name]
-            if (Owned-Process $item) {
+            if (Owned-Process $item -AllowStale) {
                 $stoppedGracefully = $false
                 if ($name -eq 'weflow') {
                     try {
@@ -156,6 +160,11 @@ try {
         for($i=0;$i -lt 60 -and -not (Test-Port ([int]$config.ports.dshPlugin));$i++){Start-Sleep -Milliseconds 250}
     }
     $health = Invoke-RestMethod $dshUrl -Headers @{Authorization='Bearer '+$env:SOCIAL_DSH_TOKEN} -TimeoutSec 3
+    $accountIdentityFile = Join-Path $stateDir 'weflow\active-account.json'
+    if (Test-Path -LiteralPath $accountIdentityFile) {
+        $accountIdentity = Get-Content -LiteralPath $accountIdentityFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($health.accountScope -ne $accountIdentity.id) { throw 'ACCOUNT_SWITCH_REQUIRES_DSH_RESTART: Fully exit DSH from the tray and reopen it after switching account.' }
+    }
     if ($health.ok -ne $true -or $health.project -ne 'WeChatAgent' -or [IO.Path]::GetFullPath($health.projectRoot) -ne [IO.Path]::GetFullPath($root)) { throw 'Install the DSH plugin from this project packages directory, then fully reopen DSH.' }
     if ($health.contextMode -ne 'native-session-v1') { throw 'Fully exit DSH from the tray and reopen it to load the native-session plugin.' }
     if ($health.behaviorPolicy -ne 'local-config-only-v1') { throw 'Fully reopen DSH to load the local-only behavior policy before starting WeChatAgent.' }

@@ -10,6 +10,7 @@ import { conversationId } from './hook-onebot.mjs';
 import { runConsoleCommand, taskFailureMessage, windowsPowerShellEnvironment, windowsPowerShellExecutable } from './console-process.mjs';
 import { personaError } from '../public/console/persona-files.mjs';
 import { runReaderSetup, readerSetupMessage } from './reader-setup.mjs';
+import { readerAccountId, cachedReaderAccount, applyReaderAccount } from './reader-account-state.mjs';
 
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -202,8 +203,13 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       if (typeof body[key] !== 'string' || body[key].length > 4096 || /[\0\r\n]/.test(body[key])) throw fault('读取设置包含无效字符。');
     }
     if (typeof body.autoKey !== 'boolean') throw fault('请选择自动连接或手动验证。');
-    const request = { operation: 'connect', dbPath: body.dbPath.trim() || settings.dbPath || '', myWxid: body.myWxid.trim() || settings.myWxid || '',
-      decryptKey: body.decryptKey.trim() || settings.decryptKey || '', autoKey: body.autoKey, wechatExecutable: snapshot().config.hook.wechatExecutable };
+    const dbPath = body.dbPath.trim() || settings.dbPath || '', myWxid = body.myWxid.trim() || settings.myWxid || '';
+    const selectedId = readerAccountId(root, { dbPath, myWxid });
+    const currentId = readerAccountId(root, settings);
+    const cached = selectedId ? cachedReaderAccount(root, selectedId) : null;
+    const request = { operation: 'connect', dbPath, myWxid,
+      decryptKey: body.decryptKey.trim() || (selectedId === currentId ? settings.decryptKey : cached?.reader?.decryptKey) || '',
+      autoKey: body.autoKey, wechatExecutable: snapshot().config.hook.wechatExecutable };
     if (!request.dbPath || !request.myWxid) throw fault('请先自动查找账号或选择微信账号文件夹。');
     return request;
   }
@@ -211,6 +217,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     assertIdle();
     const connectRequest = body.action === 'reader-connect' ? readerRequest(body) : null;
     const checkRevision = readerRevision();
+    const initialConfigRevision = snapshot().revision;
     const spec = connectRequest ? {} : command(body.action, body);
     spec.timeoutMs = ['setup', 'hook-build'].includes(body.action) ? 1200000 : ['start', 'restart'].includes(body.action) ? 180000 : 150000;
     const id = crypto.randomUUID();
@@ -224,15 +231,25 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       if (!result.ok) { job.message = readerSetupMessage(result.code); output(job.message + '\n'); return 1; }
       if (checkRevision !== readerRevision()) throw fault('读取配置已在其他程序中变化。请刷新后重试，当前配置未覆盖。', 409);
       if (!/^userdpapi:[A-Za-z0-9+/=]+$/.test(result.protectedKey ?? '') || !result.dbPath || !result.myWxid) throw fault('凭据保护或数据库验证未完成，原配置已保留。');
+      if (initialConfigRevision !== snapshot().revision) throw fault('其他设置已在验证期间变化。请刷新后重试，原账号配置已保留。', 409);
       const previousReader = optionalJson(readerFile);
       const settings = { ...previousReader, dbPath: result.dbPath, myWxid: result.myWxid, decryptKey: result.protectedKey };
-      backup(readerFile); atomic(readerFile, settings); markPending();
-      if (previousReader.dbPath !== result.dbPath || previousReader.myWxid !== result.myWxid) {
-        const ioFile = path.join(root, 'state', 'wechat-io-config.json');
-        if (fs.existsSync(ioFile)) atomic(ioFile, { ...optionalJson(ioFile), self_wxid: '' });
+      const previousId = readerAccountId(root, previousReader), nextId = readerAccountId(root, settings);
+      if (previousId && previousId !== nextId) {
+        output('新账号已验证，正在停止旧账号的读取与消息服务…\n');
+        const stopped = await execute(command('stop'), output);
+        if (stopped !== 0) throw fault('旧账号服务未能停止，原账号配置已保留。请先停止服务后再切换。');
+        const ports = snapshot().config.ports;
+        if ((await Promise.all([ports.weflow, ports.onebot, ports.adapter].map(portOpen))).some(Boolean)) throw fault('旧账号服务端口仍在使用，原账号配置已保留。请退出占用服务后再切换。');
+        if (checkRevision !== readerRevision() || initialConfigRevision !== snapshot().revision) throw fault('配置已在停止服务期间变化。请刷新后重试，原账号配置未覆盖。', 409);
       }
+      backup(readerFile); backup(configFile);
+      const applied = applyReaderAccount(root, previousReader, settings, snapshot().config);
+      markPending(applied.needsDshRestart);
       atomic(preferenceFile, { ...optionalJson(preferenceFile), readerVerifiedRevision: readerRevision() });
-      job.readerConfigured = true; output('微信数据库已验证并保存。可以继续启动服务。\n');
+      job.readerConfigured = true; job.accountSwitched = applied.changed;
+      job.dshRestartRequired = applied.needsDshRestart;
+      output(applied.changed ? '已切换并保存账号。聊天范围按账号保存；请完整重开 DSH，再启动助手服务。\n' : applied.needsDshRestart ? '微信数据库已验证并保存。如果 DSH 已打开，请完整重开 DSH，再启动助手服务。\n' : '微信数据库已验证并保存。可以继续启动服务。\n');
       return 0;
     }).then(code => {
       job.exitCode = code; job.state = code === 0 ? 'succeeded' : 'failed';
@@ -290,7 +307,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       if (req.method === 'GET' && route === '/api/deployment') {
         const distribution = optionalJson(path.join(root, 'config', 'distribution.json'));
         const readerSettings = optionalJson(path.join(root, 'state', 'weflow', 'WeFlow-config.json'));
-        return reply(200, { installed: !!distribution.installed, version: distribution.version ?? '0.2.2', configured: !!readerSettings.dbPath && !!readerSettings.myWxid && !!readerSettings.decryptKey && readerVerified(), pluginPath: path.join(root, 'packages', 'dsh-social-bridge-plugin') });
+        return reply(200, { installed: !!distribution.installed, version: distribution.version ?? '0.3.0', configured: !!readerSettings.dbPath && !!readerSettings.myWxid && !!readerSettings.decryptKey && readerVerified(), pluginPath: path.join(root, 'packages', 'dsh-social-bridge-plugin') });
       }
       if (req.method === 'GET' && route === '/api/status') return reply(200, await getStatus());
       if (req.method === 'GET' && route === '/api/roles') {
@@ -388,6 +405,8 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
           if (typeof body[key] !== 'string' || body[key].length > 4096 || /[\0\r\n]/.test(body[key])) throw fault('读取设置包含无效字符。');
         }
         if ((!body.dbPath.trim() && !settings.dbPath) || (!body.myWxid.trim() && !settings.myWxid) || (!body.decryptKey.trim() && !settings.decryptKey)) throw fault('首次配置需要数据库目录、账号标识和读取凭据。');
+        const proposed = { ...settings, dbPath: body.dbPath.trim() || settings.dbPath, myWxid: body.myWxid.trim() || settings.myWxid };
+        if (readerAccountId(root, proposed) !== readerAccountId(root, settings)) throw fault('切换账号请使用“连接并验证微信”，验证通过后会安全停止旧服务并切换。', 409);
         if (body.dbPath.trim()) settings.dbPath = body.dbPath.trim();
         if (body.myWxid.trim()) settings.myWxid = body.myWxid.trim();
         if (body.decryptKey.trim()) {

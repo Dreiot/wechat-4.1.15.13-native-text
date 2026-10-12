@@ -44,7 +44,7 @@ const engine = new SocialEngine({ buffer, roleFor: key => personaFor(key).person
   maxPerMinute: config.social?.max_per_minute ?? 3,
   maxPerTenMinutes: config.social?.max_per_ten_minutes ?? 10,
   decide: (key, prompt, metadata) => plugin.followup(key, prompt, metadata),
-  searchFor:async(message,rows,batchId)=>await plugin.searchReady()?search.prepare(buildConversationKey(message.platform,message.kind,message.conversation_id),rows,batchId):{status:'unavailable'},
+  searchFor:async(message,rows,batchId)=>{const key=buildConversationKey(message.platform,message.kind,message.conversation_id);if(!search.policy(key).enabled)return null;return await plugin.searchReady()?search.prepare(key,rows,batchId):{status:'unavailable'};},
   searchPolicyFor:message=>search.policy(buildConversationKey(message.platform,message.kind,message.conversation_id)),
   stickerChoicesFor: message=>adapter.stickerChoices({kind:message.kind,target:message.conversation_id}),
   stickerPolicyFor: message=>stickerPolicy(config.sticker_policy_file?JSON.parse(fs.readFileSync(config.sticker_policy_file,'utf8').replace(/^\uFEFF/,'' )).wechat:wechat,buildConversationKey(message.platform,message.kind,message.conversation_id)),
@@ -55,7 +55,7 @@ const engine = new SocialEngine({ buffer, roleFor: key => personaFor(key).person
 const proactive=new ProactiveEngine({stateFile:path.resolve(config.proactive_state_file??path.join(root,'state/proactive/state.json')),
   buffer,social:engine,settingsFor:()=>config.proactive_policy_file?JSON.parse(fs.readFileSync(config.proactive_policy_file,'utf8').replace(/^\uFEFF/,'')):{wechat},
   personaFor,decide:(key,prompt,metadata)=>plugin.followup(key,prompt,metadata),
-  searchFor:async(message,rows,batchId)=>await plugin.searchReady()?search.prepare(buildConversationKey(message.platform,message.kind,message.conversation_id),rows,batchId):{status:'unavailable'},
+  searchFor:async(message,rows,batchId)=>{const key=buildConversationKey(message.platform,message.kind,message.conversation_id);if(!search.policy(key).enabled)return null;return await plugin.searchReady()?search.prepare(key,rows,batchId):{status:'unavailable'};},
   send:(message,text,options)=>adapter.sendText({kind:message.kind,target:message.conversation_id,text,...options}),
   isReady:()=>adapter.stats.connected&&!!adapter.selfId,selfIdFor:()=>adapter.selfId,log});
 const contextMaintenance = new ContextMaintenance({ buffer, social: engine,

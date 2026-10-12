@@ -1,7 +1,7 @@
-export const SOCIAL_TOOL_ISOLATION = 'empty-assembly-with-history-retirement-v1';
+export const SOCIAL_TOOL_ISOLATION = 'approved-skills-with-history-retirement-v2';
 
 // Tools registered in an Agent's own scope are deliberately not masked by
-// tools.restrict({ allow: [] }). Keep the social model-facing assembly empty
+// tools.restrict({ allow: [] }). Keep the social model-facing assembly scoped
 // as well as denying execution, including tools added by Host extensions.
 export function withoutSocialTools(assembly) {
   if (!assembly || !Array.isArray(assembly.tools)) throw new Error('Social tool assembly is unavailable');
@@ -10,7 +10,7 @@ export function withoutSocialTools(assembly) {
 
 // An old Session may already contain scoped tool-addition messages. Retire
 // only their effective surface entries, preserving the original durable log
-// and ordinary conversation. DSH's SDK then projects the current empty tool
+// and ordinary conversation. DSH's SDK then projects the currently approved tool
 // set instead of replaying a deferred-only historical declaration set.
 export function retireSocialToolMetadata(session, createUserMessage) {
   const nodes = new Set(session.surface.nodes);

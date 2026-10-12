@@ -1,8 +1,8 @@
-const { app, BrowserWindow, Menu, Tray, nativeImage, dialog, ipcMain, screen } = require('electron');
+const { app, BrowserWindow, Menu, Tray, nativeImage, dialog, ipcMain, screen, shell } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { projectDirectory, safeNavigation, windowPlacement } = require('./desktop-policy.cjs');
+const { projectDirectory, safeNavigation, externalWebUrl, windowPlacement } = require('./desktop-policy.cjs');
 const { bootstrapDeployment } = require('./deployment.cjs');
 const { createAppearanceStore, strengthOf } = require('./appearance.cjs');
 
@@ -105,8 +105,21 @@ else {
       if (!trusted(event)) return;
       return require('electron').shell.openPath(path.join(root, 'packages', 'dsh-social-bridge-plugin'));
     });
-    window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-    window.webContents.on('will-navigate', (event, target) => { if (!safeNavigation(target, origin)) event.preventDefault(); });
+    const openExternal = async target => {
+      const url = externalWebUrl(target);
+      if (!url) throw new Error('只允许打开公开的 HTTP(S) 网页链接。');
+      await shell.openExternal(url);
+      return { opened:true };
+    };
+    ipcMain.handle('desktop:open-external', (event, target) => {
+      if (!trusted(event)) throw new Error('不允许此窗口打开外部链接。');
+      return openExternal(target);
+    });
+    const navigationExternal = target => { if (externalWebUrl(target)) openExternal(target).catch(error => dialog.showErrorBox('无法打开链接',error.message)); };
+    window.webContents.setWindowOpenHandler(({url}) => { navigationExternal(url); return { action:'deny' }; });
+    window.webContents.on('will-navigate', (event, target) => {
+      if (!safeNavigation(target, origin)) { event.preventDefault(); navigationExternal(target); }
+    });
     window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     window.webContents.session.setPermissionCheckHandler(() => false);
     window.webContents.on('will-prevent-unload', event => {

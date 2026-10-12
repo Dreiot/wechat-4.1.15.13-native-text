@@ -1,4 +1,7 @@
 import fs from 'node:fs';
+import {createUpdateChecker} from './update-check.mjs';
+import {builtinCatalog,applyBuiltinUpdate,extensionPresentation} from './extension-status.mjs';
+import {bundledExtensionCatalog,saveBundledExtension} from './bundled-extensions.mjs';
 import path from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
@@ -41,6 +44,7 @@ export function validateConsoleConfig(config, root) {
       [/provider|model/, '请填写有效的模型提供方与模型标识。'],
       [/wake_mode/, '请选择自然参与或唤醒后回复。'],
       [/sticker/, '表情发送与标签缓存必须使用开关值，聊天覆盖设置需要有效聊天 ID。'],
+      [/webReader/, '网页阅读设置必须是开关值。'],
       [/search/, '请检查联网搜索开关、聊天 ID 和单轮次数范围。每轮搜索次数为 1–3，摘要长度为 256–3000 字符。'],
       [/proactive/, '请检查主动聊天开关、内容方向、时间段和间隔。时间为 HH:MM，主动间隔为 30–1440 分钟。'],
       [/context/, '请检查上下文压缩设置：阈值为 4,000–2,000,000 token，空闲等待为 15–3,600 秒；单个聊天填 0 可关闭。'],
@@ -71,6 +75,7 @@ export function validateConsoleConfig(config, root) {
 }
 
 export function createConsole({ root = projectRoot, port = 3210, runner, readerSetup = runReaderSetup, fetchImpl = fetch, nodeExecutable = process.execPath, filePicker, onQuit } = {}) {
+  const updates=createUpdateChecker({root,fetchImpl});
   const publicDir = path.join(projectRoot, 'public', 'console');
   const configFile = path.join(root, 'config', 'wechatagent.json');
   const preferenceFile = path.join(root, 'state', 'console-state.json');
@@ -298,16 +303,25 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       const route = url.pathname;
       if (req.method === 'GET' && !route.startsWith('/api/')) {
         const assets = { '/': ['index.html', 'text/html; charset=utf-8'], '/index.html': ['index.html', 'text/html; charset=utf-8'], '/console.css': ['console.css', 'text/css; charset=utf-8'], '/console.js': ['console.js', 'text/javascript; charset=utf-8'], '/persona-files.mjs': ['persona-files.mjs', 'text/javascript; charset=utf-8'], '/appearance.js': ['appearance.js', 'text/javascript; charset=utf-8'], '/appearance.css': ['appearance.css', 'text/css; charset=utf-8'], '/icons.svg': ['icons.svg', 'image/svg+xml'], '/app-icon.png': ['app-icon.png', 'image/png'], '/favicon.svg': ['app-icon.png', 'image/png'] };
+        assets['/external-links.js']=['external-links.js','text/javascript; charset=utf-8'];
+        assets['/updates.js']=['updates.js','text/javascript; charset=utf-8'];
+        assets['/extensions.js']=['extensions.js','text/javascript; charset=utf-8'];
         if (!assets[route]) return reply(404, { error: '页面不存在。' });
         const [file, type] = assets[route]; return reply(200, fs.readFileSync(path.join(publicDir, file)), type);
       }
       if (req.method === 'GET' && route === '/api/info') return reply(200, { project: 'WeChatAgent Console', root, version: 1, token: csrf });
       if (req.headers['x-console-token'] !== csrf) throw fault('控制台连接已更新，请刷新页面。', 401);
+      if(req.method==='GET'&&route==='/api/updates')return reply(200,await updates.check());
       if (req.method === 'GET' && route === '/api/config') return reply(200, { ...snapshot(), ...optionalJson(preferenceFile) });
+      if (req.method === 'GET' && route === '/api/extensions') {
+        const saved=snapshot();let connected=false;try{connected=(await plugin('/health')).builtinSkills==='web-reader-v1';}catch{}
+        let runtime=null;try{runtime=await plugin('/extensions');}catch{}
+        return reply(200,bundledExtensionCatalog(root,builtinCatalog(saved.config,saved.revision,connected),runtime,saved.config));
+      }
       if (req.method === 'GET' && route === '/api/deployment') {
         const distribution = optionalJson(path.join(root, 'config', 'distribution.json'));
         const readerSettings = optionalJson(path.join(root, 'state', 'weflow', 'WeFlow-config.json'));
-        return reply(200, { installed: !!distribution.installed, version: distribution.version ?? '0.3.1', configured: !!readerSettings.dbPath && !!readerSettings.myWxid && !!readerSettings.decryptKey && readerVerified(), pluginPath: path.join(root, 'packages', 'dsh-social-bridge-plugin') });
+        return reply(200, { installed: !!distribution.installed, version: distribution.version ?? '0.3.2', configured: !!readerSettings.dbPath && !!readerSettings.myWxid && !!readerSettings.decryptKey && readerVerified(), pluginPath: path.join(root, 'packages', 'dsh-social-bridge-plugin') });
       }
       if (req.method === 'GET' && route === '/api/status') return reply(200, await getStatus());
       if (req.method === 'GET' && route === '/api/roles') {
@@ -350,8 +364,18 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       if (req.method !== 'POST') throw fault('接口不存在。', 404);
       if (!req.headers['content-type']?.startsWith('application/json')) throw fault('请使用控制台表单。', 415);
       const body = await readBody(req);
+      if(route==='/api/updates/check')return reply(200,await updates.check({force:true}));
       if (route === '/api/jobs') return reply(202, startJob(body));
       assertIdle();
+      if(route==='/api/extensions/meme-search') {saveBundledExtension(root,'meme-search',body);return reply(200,{ok:true});}
+      const builtinRoute=/^\/api\/extensions\/(native-web-reader|native-search|native-stickers|native-proactive|native-context)$/.exec(route);
+      if(builtinRoute) {
+        const previous=snapshot();
+        if(body.revision!==previous.revision)throw fault('配置已变化，请重新打开扩展设置。',409);
+        let config;try{config=validateConsoleConfig(applyBuiltinUpdate(previous.config,builtinRoute[1],body),root);}catch(error){throw error.status?error:fault(error.message);}
+        backup(configFile);atomic(configFile,config);
+        return reply(200,{...snapshot(),...optionalJson(preferenceFile)});
+      }
       if (route === '/api/reader-accounts') {
         if (typeof body.dbPath !== 'string' || body.dbPath.length > 4096 || /[\0\r\n]/.test(body.dbPath)) throw fault('目录包含无效字符。');
         protectingCredential = true;
@@ -373,7 +397,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         const config = validateConsoleConfig(body.config, root);
         if (Object.values(config.ports).includes(boundPort) || Number(new URL(config.hook.baseUrl).port || 80) === boundPort) throw fault('服务端口不能与当前控制台端口重复。');
         backup(configFile); atomic(configFile, config);
-        const withoutStickers=value=>{const copy=structuredClone(value);delete copy.wechat.stickers;delete copy.wechat.search;delete copy.wechat.proactive;delete copy.wechat.context;return copy;};
+        const withoutStickers=value=>{const copy=structuredClone(value);delete copy.wechat.stickers;delete copy.wechat.search;delete copy.wechat.webReader;delete copy.wechat.proactive;delete copy.wechat.context;return copy;};
         if(JSON.stringify(withoutStickers(previous.config))!==JSON.stringify(withoutStickers(config)))markPending(JSON.stringify(previous.config.dsh) !== JSON.stringify(config.dsh) || previous.config.ports.dshPlugin !== config.ports.dshPlugin);
         return reply(200, { ...snapshot(), ...optionalJson(preferenceFile) });
       }

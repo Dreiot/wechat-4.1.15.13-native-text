@@ -10,4 +10,5 @@ contextBridge.exposeInMainWorld('desktop', {
   exportLog: (text, name) => ipcRenderer.invoke('desktop:export-log', { text, name }),
   copyPluginPath: () => ipcRenderer.invoke('desktop:plugin-path'),
   openPluginFolder: () => ipcRenderer.invoke('desktop:plugin-folder'),
+  openExternal: url => ipcRenderer.invoke('desktop:open-external', url),
 });

@@ -116,3 +116,7 @@ Thumbs.db
 *.pfx
 *.pem
 *.key
+
+# Private extension permissions, scope and settings
+/config/extensions.json
+/config/extensions.pre-*

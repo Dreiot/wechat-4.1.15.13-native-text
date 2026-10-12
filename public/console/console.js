@@ -1,11 +1,16 @@
 'use strict';
 import { personaError, decodePersonaFile, MAX_PERSONA_BYTES } from './persona-files.mjs';
 import { initAppearance } from './appearance.js';
+import { installExternalLinks } from './external-links.js';
+import { startUpdateUI } from './updates.js';
+import { createExtensionUI } from './extensions.js';
 const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const icon = name => `<svg aria-hidden="true"><use href="/icons.svg#${name}"></use></svg>`;
 const state = { token: '', config: null, draft: null, revision: '', page: 'overview', roles: [], roleDrafts: new Map(), selectedRole: '', chatKind: 'private', names: new Map(), status: null, job: null, logs: null, loading: false, reader: null };
 const roleSaves = new Map();
+installExternalLinks({report:message=>toast(message)});
+const extensionUI = createExtensionUI({api,modal,closeModal,confirmAction,escapeHtml,icon,state,renderPage,toast,onProjectSave:syncExtensionProject});
 const pages = {
   setup: ['首次配置', '按下面的步骤连接自己的微信与模型，无需命令行。'],
   overview: ['概览', '微信助手的运行情况，一眼看清。'],
@@ -16,6 +21,7 @@ const pages = {
   connections: ['连接设置', '连接本机微信、读取服务与 DSH。'],
   logs: ['运行日志', '查看最近的运行记录，定位连接与收发问题。'],
   tools: ['工具', '安装、检查与维护，通过按钮完成。'],
+  extensions: ['扩展', '查看内置技能的开启状态和适用聊天。'],
 };
 const actions = {
   start: ['启动服务', '正在检查账号与连接，启动通常需要几十秒。'],
@@ -37,7 +43,21 @@ const actions = {
 const searchDefaults={enabled:false,cache:true,maxResults:3,maxSnippetChars:1200,maxSearchesPerTurn:1,timeoutMs:8000,cacheTtlSeconds:900};
 const proactiveDefaults={enabled:false,mode:'mixed',intervalMinutes:240,idleMinutes:120,startTime:'09:00',endTime:'22:00',useSearch:true,jitterMinutes:15};
 const contextDefaults={enabled:false,maxTokens:100000,idleSeconds:60};
-const getPath = (object, path) => {const value=path.split('.').reduce((value,key)=>value?.[key],object);if(value!==undefined)return value;if(['wechat.stickers.enabled','wechat.stickers.labelCache'].includes(path))return true;if(path.startsWith('wechat.search.'))return searchDefaults[path.split('.').at(-1)];if(path.startsWith('wechat.proactive.'))return proactiveDefaults[path.split('.').at(-1)];if(path.startsWith('wechat.context.'))return contextDefaults[path.split('.').at(-1)];return value;};
+const getPath = (object, path) => {const value=path.split('.').reduce((value,key)=>value?.[key],object);if(value!==undefined)return value;if(['wechat.stickers.enabled','wechat.stickers.labelCache'].includes(path))return true;if(path==='wechat.webReader.enabled')return true;if(path.startsWith('wechat.search.'))return searchDefaults[path.split('.').at(-1)];if(path.startsWith('wechat.proactive.'))return proactiveDefaults[path.split('.').at(-1)];if(path.startsWith('wechat.context.'))return contextDefaults[path.split('.').at(-1)];return value;};
+function syncExtensionProject(result,feature) {
+  const previous=state.config, draft=state.draft;
+  state.config=result.config;state.revision=result.revision;
+  state.draft=structuredClone(result.config);
+  // Retain unrelated pending form edits when an extension saves one feature.
+  function retain(old,savedDraft,target) {
+    for(const key of Object.keys(savedDraft ?? {})) {
+      if(key==='wechat')continue;
+      if(JSON.stringify(savedDraft[key])!==JSON.stringify(old?.[key]))target[key]=structuredClone(savedDraft[key]);
+    }
+  }
+  retain(previous,draft,state.draft);
+  for(const key of Object.keys(draft?.wechat ?? {}))if(key!==feature && JSON.stringify(draft.wechat[key])!==JSON.stringify(previous?.wechat?.[key]))state.draft.wechat[key]=structuredClone(draft.wechat[key]);
+}
 function setPath(object, path, value) { const keys = path.split('.'); const last = keys.pop(); let target = object; for (const key of keys) target = target[key] ??= {}; target[last] = value; }
 const configDirty = () => state.config && JSON.stringify(state.config) !== JSON.stringify(state.draft);
 const readerDirty = () => !!state.readerDraft && (state.readerDraft.dbPath !== (state.reader?.dbPath ?? '') || state.readerDraft.myWxid !== (state.reader?.myWxid ?? '') || !!state.readerDraft.decryptKey);
@@ -250,7 +270,8 @@ function behaviorPage() {
     <section class="card">${header('回复节奏', '控制消息合并、发送间隔与群聊频率。', '', 'sliders')}<div class="form-grid">${field('消息合并等待 / 秒', 'social.batch_ms', { type: 'number', transform: 'seconds', min: 0, max: 60, step: .1, help: '把短时间内收到的消息合并到同一轮判断。' })}${field('私聊回复最小间隔 / 秒', 'social.private_min_interval_ms', { type: 'number', transform: 'seconds', min: 0, max: 3600, step: .1 })}${field('群聊回复最小间隔 / 秒', 'social.min_interval_ms', { type: 'number', transform: 'seconds', min: 0, max: 3600, step: 1 })}${field('每分钟群回复上限 / 条', 'social.max_per_minute', { type: 'number', min: 1, max: 1000, step: 1 })}${field('每十分钟群回复上限 / 条', 'social.max_per_ten_minutes', { type: 'number', min: 1, max: 10000, step: 1 })}</div></section>
     <section class="card">${header('按人设主动聊天', '让当前人格自然找话题或问候，不强迫每次开口。', '', 'chat')}${toggle('启用定时主动聊天', 'wechat.proactive.enabled', '总开关。还需在聊天范围中逐个开启好友或群聊，默认不向任何聊天主动发送。')}${toggle('允许使用热点与新梗资料', 'wechat.proactive.useSearch', '仅在联网搜索对该聊天也开启时生效。资料不适合人设或无法取得时，改为问候或沉默。')}<div class="form-grid space-top"><div class="field full"><label for="field-proactive-mode">主动内容方向</label><select id="field-proactive-mode" data-path="wechat.proactive.mode">${[['mixed','问候、热点、新梗轮换'],['greeting','问候与生活关心'],['news','人设适合的实时热点'],['meme','人设适合的新梗 / meme']].map(([value,label])=>`<option value="${value}" ${getPath(state.draft,'wechat.proactive.mode')===value?'selected':''}>${label}</option>`).join('')}</select></div>${field('主动机会间隔 / 分钟','wechat.proactive.intervalMinutes',{type:'number',min:30,max:1440,step:1,help:'默认 240 分钟。启用后等待一个间隔，再开始考虑；模型可选择沉默。'})}${field('聊天至少安静 / 分钟','wechat.proactive.idleMinutes',{type:'number',min:5,max:1440,step:1,help:'默认 120 分钟。有新消息、待回复或正在发言时让路。'})}${field('允许开始时间 / 北京时间','wechat.proactive.startTime',{type:'time'})}${field('允许结束时间 / 北京时间','wechat.proactive.endTime',{type:'time'})}${field('随机延迟上限 / 分钟','wechat.proactive.jitterMinutes',{type:'number',min:0,max:60,step:1,help:'在间隔上增加少量随机延迟，使问候不总卡在同一时刻。'})}</div><p class="subtle">保存后一分钟内应用。沿用每个聊天当前的人设、关系和上下文；热点与梗不合适就不讲。避免重复话题和催促回复，好友明确要求不被主动打扰时暂停，直到其再次主动聊天。重启不会补发过期草稿。每个符合条件的主动机会可能调用一次模型，选择沉默也会产生模型消耗。</p></section>
     <section class="card">${header('原生表情发送', '使用独立开关控制能力，继续沿用当前人格。', '', 'chat')}${toggle('允许发送原生表情包', 'wechat.stickers.enabled', '全局默认值；可在聊天范围中为好友或群聊单独开启或关闭。保存后生效，关闭保留已下载资源。')}${toggle('学习并复用表情标签', 'wechat.stickers.labelCache', '正常看图时顺便保存内容与情绪标签，不额外调用模型。已识别表情优先使用文字标签，减少重复看图。关闭保留缓存。')}</section>
-    <section class="card">${header('联网搜索', '按需搜索，以每轮回复的次数上限控制；不设每日额度。', '', 'search')}${toggle('允许联网搜索', 'wechat.search.enabled', '“帮我搜”、天气和最新信息问题触发；普通闲聊不搜索。可在聊天范围中为好友或群聊单独覆盖，保存后生效。')}${toggle('复用短期搜索缓存', 'wechat.search.cache', '相同问题复用摘要，天气与实时信息缓存最多两分钟。缓存命中不发起新的联网请求。')}<div class="form-grid space-top">${field('每轮回复最多搜索 / 次', 'wechat.search.maxSearchesPerTurn', {type:'number',min:1,max:3,step:1,help:'默认 1 次。合并消息有多个明确查询时，最多处理这个数量；失败不会自动重试。新一轮回复重新计数。'})}${field('每轮搜索摘要最大长度 / 字符', 'wechat.search.maxSnippetChars', {type:'number',min:256,max:3000,step:1,help:'只提供截断后的摘要与来源，不把整篇网页反复放入上下文。'})}${field('搜索结果上限 / 条', 'wechat.search.maxResults', {type:'number',min:1,max:3,step:1})}${field('普通摘要缓存 / 秒', 'wechat.search.cacheTtlSeconds', {type:'number',min:60,max:3600,step:1})}${field('搜索超时 / 秒', 'wechat.search.timeoutMs', {type:'number',transform:'seconds',min:1,max:12,step:1})}</div><p class="subtle">沿用当前模型与推理设置，不强制修改输出 token 参数。次数上限约束每轮搜索次数，单次模型消耗仍取决于模型和已有上下文。完整搜索摘要会在该轮完成后退出后续上下文。使用 Bing 搜索摘要，无需填写密钥。</p></section>
+    <section class="card">${header('内置技能', '模型默认具备网页阅读能力，无需导入或配置密钥。', '', 'search')}${toggle('网页阅读', 'wechat.webReader.enabled', '默认开启。发来公开链接并要求阅读、总结或分析时，模型会读取实际正文；独立于下方联网搜索开关，保存后生效。')}<p class="subtle">例如：总结这个网页：https://example.com 。每轮最多三页，每页最多 12,000 字符；需要登录、验证码或执行 JavaScript 的页面可能无法读取。网页资料会提交给当前模型，工具调用与后续总结会产生模型消耗。</p></section>
+    <section class="card">${header('联网搜索', '按需搜索，以每轮回复的次数上限控制；不设每日额度。', '', 'search')}${toggle('允许联网搜索', 'wechat.search.enabled', '“帮我搜”、天气和最新信息问题触发；普通闲聊不搜索。可在聊天范围中为好友或群聊单独覆盖，保存后生效。')}${toggle('复用短期搜索缓存', 'wechat.search.cache', '相同问题复用摘要，天气与实时信息缓存最多两分钟。缓存命中不发起新的联网请求。')}<div class="form-grid space-top">${field('每轮回复最多搜索 / 次', 'wechat.search.maxSearchesPerTurn', {type:'number',min:1,max:3,step:1,help:'默认 1 次。合并消息有多个明确查询时，最多处理这个数量；失败不会自动重试。新一轮回复重新计数。'})}${field('每轮搜索摘要最大长度 / 字符', 'wechat.search.maxSnippetChars', {type:'number',min:256,max:3000,step:1,help:'只提供截断后的摘要与来源，不把整篇网页反复放入上下文。'})}${field('搜索结果上限 / 条', 'wechat.search.maxResults', {type:'number',min:1,max:3,step:1})}${field('普通摘要缓存 / 秒', 'wechat.search.cacheTtlSeconds', {type:'number',min:60,max:3600,step:1})}${field('搜索超时 / 秒', 'wechat.search.timeoutMs', {type:'number',transform:'seconds',min:1,max:12,step:1})}</div><p class="subtle">沿用当前模型与推理设置，不强制修改输出 token 参数。次数上限约束每轮搜索次数，单次模型消耗仍取决于模型和已有上下文。完整搜索摘要会在该轮完成后退出后续上下文。天气查询使用 Open-Meteo 预报，缺少城市时会询问；普通查询使用 Bing 摘要并过滤明显不相关的结果。无需填写密钥，天气公共接口限个人及非商业使用。</p></section>
     <section class="card">${header('图片与表情包', '普通图片继续从本机读取；以下选项仅影响表情包。', '', 'folder')}${toggle('允许从腾讯下载缺失的表情包', 'wechat.media.allowStickerCdn', '本机缓存缺失时，用白名单原消息提供的地址下载，并核验原消息摘要。')}${toggle('允许兼容旧版表情包地址', 'wechat.media.allowStickerCdnAlias', '将旧腾讯域名映射至兼容域名，仍使用 HTTPS 并核验摘要。')}</section></div>`;
 }
 function readerConfigurationCard() {
@@ -320,6 +341,7 @@ async function renderPage() {
     if (page === 'behavior') markup = contextSettingsCard() + behaviorPage();
     if (page === 'connections') { if (!state.reader) state.reader = await api('/api/reader-config'); markup = connectionsPage(); }
     if (page === 'tools') markup = toolsPage();
+    if (page === 'extensions') markup = await extensionUI.page();
     if (page === 'setup') { if (!state.reader) state.reader = await api('/api/reader-config'); markup = setupPage(); }
     if (page === 'sessions') markup = await sessionsPage();
     if (page === 'logs') markup = await logsPage();
@@ -478,6 +500,7 @@ async function load() {
     $('.version').textContent = deployment.version + ' · 关闭窗口收起到托盘';
   }
   await renderPage(); await refreshStatus();
+  if(!state.updateUIStarted){state.updateUIStarted=true;startUpdateUI({api,toast});}
 }
 document.addEventListener('input', event => {
   const input = event.target;
@@ -561,7 +584,7 @@ if (window.desktop) {
   document.body.classList.add('desktop-mode');
   $('.brand span').textContent = '桌面应用';
   $('.breadcrumb > span:first-of-type').textContent = 'WeChatAgent';
-  $('.version').textContent = '0.3.1 · 关闭窗口收起到托盘';
+  $('.version').textContent = '0.3.2 · 关闭窗口收起到托盘';
   $('#quit-console').textContent = '退出应用';
 }
 document.addEventListener('click', event => { if (document.body.classList.contains('nav-open') && !event.target.closest('.sidebar') && !event.target.closest('#menu-button')) document.body.classList.remove('nav-open'); });

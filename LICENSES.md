@@ -22,3 +22,9 @@
 - 本项目覆盖层不包含第三方 Hook 的原实现，编译与运行仍有独立授权及兼容性前置条件。
 
 公开可见不等于一般再分发许可，见 [GitHub 许可说明](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/licensing-a-repository)。本说明不是法律或平台授权保证，也不自动授予商标、账号数据或独立第三方内容的权利。
+
+## Weather data services
+
+Weather forecasts are fetched from [Open-Meteo](https://open-meteo.com/) and locations from its GeoNames-backed geocoding API. Data is provided under [CC BY 4.0](https://open-meteo.com/en/licence); source attribution is retained in the model evidence and links. The default public API is for personal/non-commercial use and subject to [Open-Meteo terms and request limits](https://open-meteo.com/en/terms). Commercial use requires a suitable provider subscription or a separately operated service. No provider source code is bundled.
+
+网页正文提取使用 [htmlparser2 10.0.0](https://github.com/fb55/htmlparser2/tree/v10.0.0)（MIT）；锁文件固定依赖，安装包保留 htmlparser2、entities、domhandler、domutils 等各自的 LICENSE。网页工具的网络地址校验复用 MIT Bridge 的 safe-fetch 逻辑，来源许可见 `components/qq-bridge/LICENSE`。仅使用本机 DNS 解析；代理返回 Fake-IP 时按非公开地址拒绝，不向额外 DNS 服务发送网页域名。

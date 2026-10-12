@@ -8,6 +8,7 @@ import { validateStickerSettings } from '../components/qq-bridge/src/core/sticke
 import { validateSearchSettings } from '../packages/dsh-social-bridge-plugin/search-policy.mjs';
 import {validateProactiveSettings} from '../components/qq-bridge/src/core/proactive-policy.js';
 import { validateContextSettings } from '../packages/dsh-social-bridge-plugin/context-policy.mjs';
+import { validateWebReaderSettings } from '../packages/dsh-social-bridge-plugin/web-reader-policy.mjs';
 
 export const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (file) => JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
@@ -21,6 +22,7 @@ export function validateConfig(config) {
   validateSearchSettings(config.wechat?.search);
   validateProactiveSettings(config.wechat?.proactive);
   validateContextSettings(config.wechat?.context);
+  validateWebReaderSettings(config.wechat?.webReader);
   if (config.version !== 1) throw new Error('Unsupported WeChatAgent config version');
   if (!['nt', 'bundled', 'existing'].includes(config.runtime?.weflowMode ?? 'nt')) throw new Error('weflowMode must be nt, bundled or existing');
   if (config.runtime?.sender !== 'wechat-hook') throw new Error('sender must be wechat-hook; the UIA sender has been removed');
@@ -105,7 +107,7 @@ export function prepare(root = projectRoot) {
   if (fs.existsSync(patchFile)) {
     const before = fs.readFileSync(patchFile, 'utf8');
     let after = before.replace(/^(        provider:).*/m, `$1 ${JSON.stringify(config.dsh.provider)}`).replace(/^(        model:).*/m, `$1 ${JSON.stringify(config.dsh.model)}`);
-    const moduleDir=path.dirname(patchFile),sources=['native-context.mjs','search-budget.mjs','search-policy.mjs','social-tool-policy.mjs','social-tool-restrict.mjs','context-policy.mjs'].map(name=>path.join(moduleDir,name));
+    const moduleDir=path.dirname(patchFile),sources=['native-context.mjs','web-reader.mjs','web-reader-policy.mjs','web-reader-content.mjs','web-reader-fetch.mjs','skills/web-reader/skill.json','skills/web-reader/SKILL.md','search-budget.mjs','search-policy.mjs','weather-query.mjs','weather-source.mjs','social-tool-policy.mjs','social-tool-restrict.mjs','context-policy.mjs'].map(name=>path.join(moduleDir,name));
     if(sources.every(file=>fs.existsSync(file))){
       const revision=crypto.createHash('sha256').update(Buffer.concat(sources.map(file=>fs.readFileSync(file)))).digest('hex').slice(0,16);
       const entry=pathToFileURL(sources[0]).href+'?wechatagent='+revision;

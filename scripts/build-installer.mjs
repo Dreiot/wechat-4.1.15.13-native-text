@@ -57,7 +57,7 @@ add('config/wechatagent.example.json');
 const presetNames = fs.readdirSync(path.join(root, 'roles')).filter(name => name.endsWith('.md') && name !== 'README.md');
 for (const name of presetNames) add('roles/' + name);
 addTree('public/console');
-const scriptNames = ['project-config.mjs','migrate-io-config.mjs','manage.ps1','console-server.mjs','console-process.mjs','console-powershell.ps1','console-native.ps1','sync-weflow.cjs','hook-onebot.mjs','reader-api.py','reader-requirements.txt','wechat_media.py','wechat_sticker.py','wechat_sticker_send.py','wechat_forwarded.py','resolve-wechat-image.py','list-friend-ids.mjs','manage-dsh-sessions.mjs','launch-hook-wechat.ps1','pin-hook-client.ps1','launch-dsh.ps1','check-runtime.ps1','setup.ps1','build-hook.ps1'];
+const scriptNames = ['project-config.mjs','extension-status.mjs','bundled-extensions.mjs','update-check.mjs','migrate-io-config.mjs','manage.ps1','console-server.mjs','console-process.mjs','console-powershell.ps1','console-native.ps1','sync-weflow.cjs','hook-onebot.mjs','reader-api.py','reader-requirements.txt','wechat_media.py','wechat_sticker.py','wechat_sticker_send.py','wechat_forwarded.py','resolve-wechat-image.py','list-friend-ids.mjs','manage-dsh-sessions.mjs','launch-hook-wechat.ps1','pin-hook-client.ps1','launch-dsh.ps1','check-runtime.ps1','setup.ps1','build-hook.ps1'];
 for (const name of [...scriptNames, 'check-runtime.py', 'wechat_sticker_labels.py', 'wechat_quote.py', 'text-delivery-store.mjs', 'reader-setup.mjs', 'reader_setup.py', 'reader-account-state.mjs']) add('scripts/' + name);
 addTree('scripts/native-hook');
 for (const name of ['nt_decrypt.py','nt_common.py']) add('components/weflow-cli/scripts/' + name);
@@ -66,6 +66,9 @@ add('components/weflow-cli/resources/key/win32/x64/wx_key.dll');
 for (const directory of ['core','onebot','adapters/wechat','dsh']) addTree('components/qq-bridge/src/' + directory, name => !name.includes('.test.'));
 for (const name of ['social-bridge.js','role-card.js','adapters/base-adapter.js']) add('components/qq-bridge/src/' + name);
 add('components/qq-bridge/LICENSE');
+add('components/qq-bridge/src/safe-fetch.js');
+addTree('packages/extension-runtime', (name, dir) => dir || /\.(mjs|md)$/.test(name));
+addTree('extensions/skills/meme-search', (name, dir) => dir || /\.(js|json|md)$/.test(name));
 fs.writeFileSync(path.join(project, 'components/qq-bridge/package.json'), JSON.stringify({ name:'wechatagent-social-bridge', type:'module', private:true, license:'MIT' })); files.push('components/qq-bridge/package.json');
 const bridgeFile = path.join(project, 'components/qq-bridge/src/social-bridge.js');
 fs.writeFileSync(bridgeFile, fs.readFileSync(bridgeFile, 'utf8').replace('这是蓝色大肥鱼的 AI 接入测试。', '这是微信助手的 AI 接入测试。'));
@@ -88,7 +91,7 @@ const sourceHashes = Object.fromEntries(fileList.map(file => [file, sha(fs.readF
 const desktopHashes = Object.fromEntries(fs.readdirSync(appDir).filter(file=>fs.statSync(path.join(appDir,file)).isFile()).sort().map(file=>[file,sha(fs.readFileSync(path.join(appDir,file)))]));
 const runtimeRevision = sha(Buffer.from(JSON.stringify({node:sha(fs.readFileSync(process.execPath)),python:fs.readFileSync(path.join(stage,'runtime/python/DEPENDENCIES.json'),'utf8'),dsh:sha(fs.readFileSync(path.join(dsh,'resources/app.asar')))}))).slice(0,12);
 const buildId = sha(Buffer.from(JSON.stringify({sourceHashes,desktopHashes,runtimeRevision,hook:sha(fs.readFileSync(path.join(vendor,'hook/version.dll')))}))).slice(0,16);
-fs.writeFileSync(path.join(project, 'deployment.json'), JSON.stringify({ version, buildId, runtimeRevision, sourceHashes, files:fileList, presets:presetNames.map(name=>name.slice(0,-3)), node:process.version, python:'3.13.16', dshVersion:dshPackage.version, privateAccountDataIncluded:false, authorization:'Maintainer confirmed redistribution authorization for all currently used components and requested all current role files as bundled presets on 2026-10-05.' }, null, 2));
+fs.writeFileSync(path.join(project, 'deployment.json'), JSON.stringify({ version, buildId, builtAt:new Date().toISOString(), runtimeRevision, sourceHashes, files:fileList, presets:presetNames.map(name=>name.slice(0,-3)), node:process.version, python:'3.13.16', dshVersion:dshPackage.version, privateAccountDataIncluded:false, authorization:'Maintainer confirmed redistribution authorization for all currently used components and requested all current role files as bundled presets on 2026-10-05.' }, null, 2));
 // No personal data can enter the deployment template or vendor programs.
 for (const file of fs.readdirSync(project, { recursive:true })) {
   const relative = String(file).replaceAll('\\','/');

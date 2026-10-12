@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { CHAT_POLICY_NOTICE, CHAT_COHERENCE_NOTICE, LOCKED_BEHAVIOR_REPLY, isBehaviorChangeCommand } from './chat-policy.js';
 import { normalizeForwardedRecord, forwardedRecordText, normalizeQuoteReply, quoteReplyText } from './wechat-events.js';
 import { selectStickerChoices, cleanStickerLabel, stickerPolicyKey } from './sticker-policy.js';
-import { SOCIAL_OUTPUT_NOTICE, resolveSocialDecision } from './decision-format.js';
+import { SOCIAL_OUTPUT_NOTICE, resolveSocialDecision, hasStickerControl } from './decision-format.js';
 export { parseSocialDecision } from './decision-format.js';
 import {SEARCH_DEFAULTS,searchPolicyKey,searchQuery} from '../../../../packages/dsh-social-bridge-plugin/search-policy.mjs';
 
@@ -253,6 +253,7 @@ export class SocialEngine {
         : {output:null,result:remembered?.result??{decision:'RESPOND',text:LOCKED_BEHAVIOR_REPLY}};
       const {output,result}=resolved;
       if (result.decision === 'INVALID') throw new Error('INVALID_DECISION_FORMAT');
+      if (result.decision === 'RESPOND' && [result.text, ...(result.textParts ?? [])].some(hasStickerControl)) throw new Error('INVALID_DECISION_FORMAT: sticker reference in cached text');
       if(!remembered?.sending&&stickerPolicyKey(await this.stickerPolicyFor(message))!==policyKey){this.decisions.delete(key);this.dirty.add(key);return;}
       if(!remembered?.sending&&searchPolicyKey(await getSearchPolicy())!==searchKey){this.decisions.delete(key);this.dirty.add(key);return;}
       if(result.decision==='STICKER' && !remembered && !stickerChoices.some(item=>item.id===result.stickerId))throw new Error('STICKER_CHOICE_NOT_ALLOWED');

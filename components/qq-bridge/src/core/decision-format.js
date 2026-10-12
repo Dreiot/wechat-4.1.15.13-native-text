@@ -1,12 +1,28 @@
 import crypto from 'node:crypto';
 import { splitStickerLabels } from './sticker-policy.js';
 
-export const SOCIAL_OUTPUT_NOTICE = '发送协议（仅包装回复，不改变人格、语气或正文标点）：需要回复时，第一行必须以英文 RESPOND: 开头，后面接真正要发的正文，可保留空格和换行；沉默时仅输出 SILENT。标记由程序移除，不会发给对方。人格示例中的“你：”“回复：”是示例说话人，不是发送协议；不要翻译标记、添加说话人或内部推理，也不要用 Markdown 包裹标记。';
+export const SOCIAL_OUTPUT_NOTICE = '发送协议（仅包装回复，不改变人格、语气或正文标点）：需要回复时，第一行必须以英文 RESPOND: 开头，后面接真正要发的正文，可保留空格和换行；沉默时仅输出 SILENT。标记由程序移除，不会发给对方。人格示例中的“你：”“回复：”是示例说话人，不是发送协议；不要翻译标记、添加说话人或内部推理，也不要用 Markdown 包裹标记。表情候选编号不能写进文字正文；仅能按本轮候选使用 [STICKER:编号] 发送表情，未提供候选时只回复文字或沉默。';
+
+export function hasStickerControl(text) {
+  return /[\[［【]\s*(?:S\d+\s*(?:[\]］】]|$)|STICKER\s*[:：])/i.test(String(text ?? ''));
+}
+
+function shortStickerDecision(text, stickerRefs) {
+  const short = /^\[\s*(?:STICKER\s*:\s*)?(S[1-3])\s*\]$/i.exec(text);
+  if (!short) return null;
+  const ref = short[1].toUpperCase();
+  const id = Object.hasOwn(stickerRefs, ref) ? stickerRefs[ref] : '';
+  return typeof id === 'string' && /^[a-f0-9]{64}$/.test(id)
+    ? { decision: 'STICKER', stickerId: id, text: '' }
+    : { decision: 'INVALID', text: '' };
+}
 
 export function parseSocialDecision(output, stickerRefs = {}) {
   const text = String(output ?? '').trim().replace(/^```(?:text|plaintext)?\s*\n([\s\S]*?)\n```$/i, '$1').trim();
   if (/^\[?SILENT\]?$/i.test(text)) return { decision: 'SILENT', text: '' };
   if (/^(OBSERVE|DEFER)$/i.test(text)) return { decision: text.toUpperCase(), text: '' };
+  const standalone = shortStickerDecision(text, stickerRefs);
+  if (standalone) return standalone;
   // Accept the explicit localized envelope seen in persona replies. Unmarked
   // prose still requires a model correction; it may contain internal reasoning.
   const tagged = /^(?:RESPOND|回复)\s*[:：]\s*([\s\S]+)$/i.exec(text)
@@ -17,9 +33,9 @@ export function parseSocialDecision(output, stickerRefs = {}) {
   if (/^\[?SILENT\]?$/i.test(reply)) return { decision: 'SILENT', text: '' };
   const sticker = /^\[STICKER:([a-f0-9]{64})\]$/.exec(reply);
   if (sticker) return { decision: 'STICKER', stickerId: sticker[1], text: '' };
-  const short = /^\[STICKER:(S[1-3])\]$/.exec(reply);
-  if (short && stickerRefs[short[1]]) return { decision: 'STICKER', stickerId: stickerRefs[short[1]], text: '' };
-  if (/^\[STICKER:/i.test(reply)) return { decision: 'INVALID', text: '' };
+  const short = shortStickerDecision(reply, stickerRefs);
+  if (short) return short;
+  if (hasStickerControl(reply)) return { decision: 'INVALID', text: '' };
   return { decision: 'RESPOND', text: reply.slice(0, 1200) };
 }
 
@@ -31,7 +47,7 @@ export async function resolveSocialDecision({ rawOutput, key, metadata, decide, 
   const repairMetadata = { ...metadata };
   // A distinct, deterministic identity bypasses the malformed cached result
   // without creating another model correction on each replay of this batch.
-  if (metadata.batchId) repairMetadata.batchId = crypto.createHash('sha256').update(metadata.batchId + '\0format-repair-v1').digest('hex');
+  if (metadata.batchId) repairMetadata.batchId = crypto.createHash('sha256').update(metadata.batchId + '\0format-repair-v2').digest('hex');
   delete repairMetadata.searchTicket;
   delete repairMetadata.searchContext;
   const previous = output.text.slice(0, 2000).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');

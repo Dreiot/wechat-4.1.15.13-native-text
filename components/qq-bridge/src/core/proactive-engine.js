@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {buildConversationKey,parseConversationKey} from './conversation-key.js';
-import {SOCIAL_OUTPUT_NOTICE,resolveSocialDecision} from './decision-format.js';
+import {SOCIAL_OUTPUT_NOTICE,resolveSocialDecision,hasStickerControl} from './decision-format.js';
 import {CHAT_POLICY_NOTICE,CHAT_COHERENCE_NOTICE} from './chat-policy.js';
 import {proactivePolicy,proactivePolicyKey,withinProactiveWindow,nextProactiveAt,conversationSnapshot,declinedProactive} from './proactive-policy.js';
 
@@ -105,6 +105,9 @@ export class ProactiveEngine {
       Object.assign(job,{evaluating:false,text:result.text,message});this.save();
     }
     if(this.finishRecorded(key,item))return;
+    if ([job.text, ...(job.textParts ?? [])].some(hasStickerControl)) {
+      this.notice(key,job.id); item.job=null; this.save(); this.log(`[Proactive] ${key} skipped invalid_sticker_reference`); return;
+    }
     const fresh=await this.settingsFor(),current=proactivePolicy(fresh.wechat??fresh,key),livePersona=await this.personaFor(key);
     if(!this.eligible(key,current,this.now())||proactivePolicyKey(current)!==item.signature||hash(JSON.stringify([livePersona.personaName,livePersona.persona]))!==job.personaDigest||conversationSnapshot(this.buffer.recent(key,this.buffer.maxPerChat))!==job.snapshot){
       this.notice(key,job.id);item.job=null;this.save();this.log(`[Proactive] ${key} cancelled_context_changed`);return;

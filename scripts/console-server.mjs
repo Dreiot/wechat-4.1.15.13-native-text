@@ -12,6 +12,7 @@ import { validateConfig, projectRoot } from './project-config.mjs';
 import { conversationId } from './hook-onebot.mjs';
 import { runConsoleCommand, taskFailureMessage, windowsPowerShellEnvironment, windowsPowerShellExecutable } from './console-process.mjs';
 import { personaError } from '../public/console/persona-files.mjs';
+import {applyChatSettings} from '../public/console/conversation-settings.mjs';
 import { runReaderSetup, readerSetupMessage } from './reader-setup.mjs';
 import { readerAccountId, cachedReaderAccount, applyReaderAccount } from './reader-account-state.mjs';
 
@@ -74,6 +75,7 @@ export function validateConsoleConfig(config, root) {
   return config;
 }
 
+import {allowedConversation,validateConversationSettings} from '../packages/dsh-social-bridge-plugin/conversation-policy.mjs';
 export function createConsole({ root = projectRoot, port = 3210, runner, readerSetup = runReaderSetup, fetchImpl = fetch, nodeExecutable = process.execPath, filePicker, onQuit } = {}) {
   const updates=createUpdateChecker({root,fetchImpl});
   const publicDir = path.join(projectRoot, 'public', 'console');
@@ -305,7 +307,8 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         const assets = { '/': ['index.html', 'text/html; charset=utf-8'], '/index.html': ['index.html', 'text/html; charset=utf-8'], '/console.css': ['console.css', 'text/css; charset=utf-8'], '/console.js': ['console.js', 'text/javascript; charset=utf-8'], '/persona-files.mjs': ['persona-files.mjs', 'text/javascript; charset=utf-8'], '/appearance.js': ['appearance.js', 'text/javascript; charset=utf-8'], '/appearance.css': ['appearance.css', 'text/css; charset=utf-8'], '/icons.svg': ['icons.svg', 'image/svg+xml'], '/app-icon.png': ['app-icon.png', 'image/png'], '/favicon.svg': ['app-icon.png', 'image/png'] };
         assets['/external-links.js']=['external-links.js','text/javascript; charset=utf-8'];
         assets['/updates.js']=['updates.js','text/javascript; charset=utf-8'];
-        assets['/extensions.js']=['extensions.js','text/javascript; charset=utf-8'];
+        assets['/conversation-settings.mjs']=['conversation-settings.mjs','text/javascript; charset=utf-8'];
+        assets['/dsh-access.js']=['dsh-access.js','text/javascript; charset=utf-8'];assets['/extensions.js']=['extensions.js','text/javascript; charset=utf-8'];
         if (!assets[route]) return reply(404, { error: '页面不存在。' });
         const [file, type] = assets[route]; return reply(200, fs.readFileSync(path.join(publicDir, file)), type);
       }
@@ -313,15 +316,13 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       if (req.headers['x-console-token'] !== csrf) throw fault('控制台连接已更新，请刷新页面。', 401);
       if(req.method==='GET'&&route==='/api/updates')return reply(200,await updates.check());
       if (req.method === 'GET' && route === '/api/config') return reply(200, { ...snapshot(), ...optionalJson(preferenceFile) });
-      if (req.method === 'GET' && route === '/api/extensions') {
-        const saved=snapshot();let connected=false;try{connected=(await plugin('/health')).builtinSkills==='web-reader-v1';}catch{}
-        let runtime=null;try{runtime=await plugin('/extensions');}catch{}
-        return reply(200,bundledExtensionCatalog(root,builtinCatalog(saved.config,saved.revision,connected),runtime,saved.config));
-      }
+      if(req.method==='GET'&&route==='/api/sticker-pool')return reply(200,await reader('/api/v1/stickers/pool-status'));
+      if(req.method==='GET'&&route==='/api/dsh-catalog')return reply(200,await plugin('/dsh-catalog'));
+      if(req.method==='GET'&&route==='/api/extensions'){const saved=snapshot();let connected=false;try{connected=!!(await plugin('/health')).ok;}catch{}return reply(200,builtinCatalog(saved.config,saved.revision,connected));}
       if (req.method === 'GET' && route === '/api/deployment') {
         const distribution = optionalJson(path.join(root, 'config', 'distribution.json'));
         const readerSettings = optionalJson(path.join(root, 'state', 'weflow', 'WeFlow-config.json'));
-        return reply(200, { installed: !!distribution.installed, version: distribution.version ?? '0.3.2', configured: !!readerSettings.dbPath && !!readerSettings.myWxid && !!readerSettings.decryptKey && readerVerified(), pluginPath: path.join(root, 'packages', 'dsh-social-bridge-plugin') });
+        return reply(200, { installed: !!distribution.installed, version: distribution.version ?? '0.3.3', configured: !!readerSettings.dbPath && !!readerSettings.myWxid && !!readerSettings.decryptKey && readerVerified(), pluginPath: path.join(root, 'packages', 'dsh-social-bridge-plugin') });
       }
       if (req.method === 'GET' && route === '/api/status') return reply(200, await getStatus());
       if (req.method === 'GET' && route === '/api/roles') {
@@ -367,7 +368,21 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       if(route==='/api/updates/check')return reply(200,await updates.check({force:true}));
       if (route === '/api/jobs') return reply(202, startJob(body));
       assertIdle();
-      if(route==='/api/extensions/meme-search') {saveBundledExtension(root,'meme-search',body);return reply(200,{ok:true});}
+      if (route === '/api/chat-settings') {
+        const previous = snapshot();
+        if (body.revision !== previous.revision) throw fault('配置已变化，请重新打开此会话设置。', 409);
+        if (!allowedConversation(previous.config.wechat, body.key)) throw fault('只能设置已保存到聊天范围的会话。');
+        const config = structuredClone(previous.config);
+        applyChatSettings(config, body.key, body.settings, body.access);
+        validateConsoleConfig(config, root);
+        const personaChanged = (previous.config.persona.chats?.[body.key] ?? null) !== (config.persona.chats?.[body.key] ?? null);
+        backup(configFile); atomic(configFile, config);
+        if (personaChanged) markPending();
+        statusTime = 0;
+        return reply(200, { ...snapshot(), ...optionalJson(preferenceFile), personaChanged });
+      }
+      if(route==='/api/dsh-access'){const previous=snapshot();if(body.revision!==previous.revision)throw fault('配置已变化，请重新打开此聊天设置。',409);if(!allowedConversation(previous.config.wechat,body.key))throw fault('只能为已允许的聊天分配技能。');const config=structuredClone(previous.config);config.wechat.dshAccess??={chats:{}};config.wechat.dshAccess.chats[body.key]={skills:body.skills,tools:body.tools};validateConversationSettings(config.wechat);backup(configFile);atomic(configFile,config);statusTime=0;return reply(200,{...snapshot(),pendingApply:false});}
+      if(route==='/api/extensions/meme-search')throw fault('表情素材工具由 DSH 项目插件提供，请在 DSH 授权页分配到聊天。',410);
       const builtinRoute=/^\/api\/extensions\/(native-web-reader|native-search|native-stickers|native-proactive|native-context)$/.exec(route);
       if(builtinRoute) {
         const previous=snapshot();
@@ -397,7 +412,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         const config = validateConsoleConfig(body.config, root);
         if (Object.values(config.ports).includes(boundPort) || Number(new URL(config.hook.baseUrl).port || 80) === boundPort) throw fault('服务端口不能与当前控制台端口重复。');
         backup(configFile); atomic(configFile, config);
-        const withoutStickers=value=>{const copy=structuredClone(value);delete copy.wechat.stickers;delete copy.wechat.search;delete copy.wechat.webReader;delete copy.wechat.proactive;delete copy.wechat.context;return copy;};
+        const withoutStickers=value=>{const copy=structuredClone(value);delete copy.wechat.stickers;delete copy.wechat.search;delete copy.wechat.webReader;delete copy.wechat.proactive;delete copy.wechat.context;delete copy.wechat.chatModes;delete copy.wechat.dshAccess;return copy;};
         if(JSON.stringify(withoutStickers(previous.config))!==JSON.stringify(withoutStickers(config)))markPending(JSON.stringify(previous.config.dsh) !== JSON.stringify(config.dsh) || previous.config.ports.dshPlugin !== config.ports.dshPlugin);
         return reply(200, { ...snapshot(), ...optionalJson(preferenceFile) });
       }

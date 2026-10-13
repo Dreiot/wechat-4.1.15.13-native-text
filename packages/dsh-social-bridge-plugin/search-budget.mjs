@@ -16,7 +16,7 @@ export function admittedSearch(root,key,body){
     record.contextDigest!==crypto.createHash('sha256').update(body.searchContext).digest('hex')||
     searchCharCount(body.searchContext)>policy.maxSnippetChars)throw Error('SEARCH_BUDGET_DENIED');
   if(fs.existsSync(path.join(root,'state/search/used',body.searchTicket+'.json')))throw Error('SEARCH_TICKET_SPENT');
-  return {ticket:body.searchTicket,text:body.searchContext,requests:0};
+  return {ticket:body.searchTicket,text:body.searchContext,requests:0,searches:record.searches};
 }
 
 export function consumeSearchRequest(root,key,search){

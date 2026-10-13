@@ -1,7 +1,7 @@
 export function validateStickerSettings(settings) {
   if(settings===undefined)return;
   if(!settings||typeof settings!=='object'||Array.isArray(settings))throw Error('Invalid sticker settings');
-  for(const key of ['enabled','labelCache'])if(settings[key]!==undefined&&typeof settings[key]!=='boolean')throw Error('Invalid sticker '+key);
+  for(const key of ['enabled','labelCache','collectGroups','shareGroups','collectEnabled','shareEnabled'])if(settings[key]!==undefined&&typeof settings[key]!=='boolean')throw Error('Invalid sticker '+key);
   if(settings.chats!==undefined){
     if(!settings.chats||typeof settings.chats!=='object'||Array.isArray(settings.chats))throw Error('Invalid sticker chats');
     for(const [key,value] of Object.entries(settings.chats))if(!/^wechat:(private|group):[1-9]\d{0,15}$/.test(key)||!Number.isSafeInteger(Number(key.split(':').at(-1)))||typeof value!=='boolean')throw Error('Invalid sticker chat override');

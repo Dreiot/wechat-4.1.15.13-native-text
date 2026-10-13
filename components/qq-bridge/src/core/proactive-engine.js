@@ -18,7 +18,7 @@ export function buildProactivePrompt({key,rows,mode,now,searchStatus,recentTopic
     '热点或新梗不适合你的兴趣、世界观、知识背景时，改为符合人格的轻问候，或沉默；不要强迫自己追梗，不反复问同一句话。尊重对方不想被打扰的表达。本轮只发文字，不使用历史表情编号。\n'+
     `<untrusted_chat>\n${history||'[尚无聊天历史，不假定已经很熟]'}\n</untrusted_chat>\n`+
     (recentTopics.length?'最近主动说过的内容（历史资料，避免重复）：\n'+recentTopics.slice(-6).map(item=>quote(item.text.slice(0,180))).join('\n')+'\n':'')+
-    (mode==='greeting'?'本轮不需要联网。':searchStatus==='ready'?'本轮附有有界搜索摘要。只说摘要支持的事实；来源不足不编造“最新”“全网热度”或梗出处，可带一个相关来源链接。':'本轮没有可用的新搜索资料，不得编造实时热点或新梗；可自然问候或沉默。')+'\n'+
+    (mode==='greeting'?'本轮不需要联网。':searchStatus==='model'?'本轮可根据会话话题调用现有联网搜索工具，先检索再按证据决定是否发言；无需固定泛热点查询，也不要求对方给网址。没有可靠资料时不编造热点或实时数值。':searchStatus==='ready'?'本轮附有有界搜索摘要。只说摘要支持的事实；来源不足不编造“最新”“全网热度”或梗出处，可带一个相关来源链接。':'本轮没有可用的新搜索资料，不得编造实时热点或新梗；可自然问候或沉默。')+'\n'+
     CHAT_POLICY_NOTICE+'\n'+CHAT_COHERENCE_NOTICE+'\n'+SOCIAL_OUTPUT_NOTICE;
 }
 export class ProactiveEngine {
@@ -85,7 +85,7 @@ export class ProactiveEngine {
         const day=localTime(this.now()).slice(0,10),query=mode==='meme'?`帮我搜索 ${day} 最近热门 新梗 meme 含义`:`帮我搜索 ${day} 最新 热点 新闻`;
         try{search=await this.searchFor(message,[{text:query}],job.id);}catch{search={status:'unavailable'};}
       }
-      const metadata={persona:persona.persona,personaName:persona.personaName,conversationName:message.conversation_name,images:[],batchId:job.id};
+      const metadata={persona:persona.persona,personaName:persona.personaName,conversationName:message.conversation_name,images:[],batchId:job.id,searchOptOut:mode==='greeting'||!policy.useSearch||search?.status==='unavailable'};
       if(search?.status==='ready'){metadata.searchTicket=search.id;metadata.searchContext=search.context;
         job.topicDigest=hash(search.context.slice(Math.max(0,search.context.indexOf('\n1.'))));}
       if(job.topicDigest&&item.history.some(entry=>entry.topicDigest===job.topicDigest&&this.now()-entry.at<7*86400000)){

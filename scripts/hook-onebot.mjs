@@ -177,15 +177,15 @@ export class HookOneBot {
       throw new AdapterError('TEXT_DELIVERY_UNCONFIRMED',{attempted:true,delivery_id:deliveryId??operation});
     } finally { this.targetsSending.delete(key); }
   }
-  async stickerList(kind,target){
+  async stickerList(kind,target,query){
     this.reload();
     if(!this.allowed(kind,target))fail('CONVERSATION_NOT_ALLOWED');
     if(!stickerPolicy(this.project.wechat,'wechat:'+kind+':'+target).enabled)return {enabled:false,stickers:[]};
     await this.checkNative();
     if(!this.status.native_sticker_send)return {enabled:false,stickers:[]};
     const key='wechat:'+kind+':'+target;
-    const result=await this.reader('/api/v1/stickers?conversationKey='+encodeURIComponent(key));
-    return {enabled:true,stickers:(result.stickers??[]).filter(item=>/^[a-f0-9]{64}$/.test(item?.id??'')).slice(0,8).map(item=>({id:item.id,receivedAt:item.receivedAt,...(cleanStickerLabel(item)??{})}))};
+    const result=await this.reader('/api/v1/stickers?conversationKey='+encodeURIComponent(key)+(typeof query==='string'&&query.trim()?'&query='+encodeURIComponent(query.slice(0,500)):''));
+    return {enabled:true,stickers:(result.stickers??[]).filter(item=>/^[a-f0-9]{64}$/.test(item?.id??'')).slice(0,20).map(item=>({id:item.id,receivedAt:item.receivedAt,...(cleanStickerLabel(item)??{})}))};
   }
   async stickerLabels(kind,target,params){
     this.reload();if(!this.allowed(kind,target))fail('CONVERSATION_NOT_ALLOWED');
@@ -218,13 +218,13 @@ export class HookOneBot {
         if(this.stickerPending.get(key)?.id===id){this.stickerPending.delete(key);this.persistStickerPending();}
         return {...completed.response,reused:true};
       }
-      const sticker=await this.reader('/api/v1/stickers/'+id+'?conversationKey='+encodeURIComponent(conversationKey));
-      if(sticker.id!==id || sticker.conversationKey!==conversationKey || !/^[a-f0-9]{32}$/.test(sticker.fields?.md5??''))fail('STICKER_BINDING_INVALID');
       const keyOf=row=>JSON.stringify([row.localId,row.createTime]);
       let attempt=this.stickerPending.get(key);
       if(attempt && attempt.id!==id)fail('STICKER_PREVIOUS_DELIVERY_UNCONFIRMED');
       if(attempt && (attempt.account!==identity.account || attempt.wxid!==wxid))fail('STICKER_DELIVERY_ACCOUNT_MISMATCH');
       if(!attempt){
+      const sticker=await this.reader('/api/v1/stickers/'+id+'?conversationKey='+encodeURIComponent(conversationKey));
+      if(sticker.id!==id || sticker.conversationKey!==conversationKey || !/^[a-f0-9]{32}$/.test(sticker.fields?.md5??''))fail('STICKER_BINDING_INVALID');
         attempt={id,md5:sticker.fields.md5,account:identity.account,wxid,baseline:new Set((await this.messages(wxid)).map(keyOf)),started:Math.floor(Date.now()/1000)-1};
         this.reload();if(!this.allowed(kind,target))fail('CONVERSATION_NOT_ALLOWED');
         if(!stickerPolicy(this.project.wechat,conversationKey).enabled)fail('STICKER_SENDING_DISABLED');
@@ -281,7 +281,7 @@ export class HookOneBot {
       } else if(['get_sticker_list','get_sticker_labels','save_sticker_labels'].includes(action)){
         const kind=params.kind,target=String(params.target??'');
         if(!['group','private'].includes(kind)||!/^\d+$/.test(target))fail('INVALID_STICKER_TARGET');
-        data=action==='get_sticker_list'?await this.stickerList(kind,target):await this.stickerLabels(kind,target,{operation:action==='get_sticker_labels'?'read':'save',...(action==='get_sticker_labels'?{ids:params.ids}:{labels:params.labels})});
+        data=action==='get_sticker_list'?await this.stickerList(kind,target,params.query):await this.stickerLabels(kind,target,{operation:action==='get_sticker_labels'?'read':'save',...(action==='get_sticker_labels'?{ids:params.ids}:{labels:params.labels})});
       } else if (action === 'get_status') {
         data = { online: this.status.hook_account_verified, good: this.status.hook_account_verified && this.status.reader_connected };
       } else if (action === 'get_version_info') {

@@ -8,7 +8,7 @@ import { buildConversationKey } from './core/conversation-key.js';
 import { selectRoleText } from './role-card.js';
 import { socialPersona } from './core/social-persona.js';
 import { stickerPolicy } from './core/sticker-policy.js';
-import { WebSearch } from './core/web-search.js';
+import { searchPolicy } from '../../../packages/dsh-social-bridge-plugin/search-policy.mjs';
 import {ProactiveEngine} from './core/proactive-engine.js';
 import { ContextMaintenance } from './core/context-maintenance.js';
 
@@ -28,7 +28,14 @@ const log = (line) => console.log(new Date().toISOString(), line);
 const buffer = new MessageBuffer(path.resolve(root, config.message_buffer?.path ?? 'state/social-messages.json'),
   { maxPerChat: config.message_buffer?.max_messages_per_chat ?? 300 });
 const plugin = new DshPluginClient(config.dsh_plugin ?? {}, log);
-const search=new WebSearch({configFile:config.search_policy_file,stateFile:path.resolve(config.search_state_file??path.join(root,'state/search/state.json')),settings:wechat,log});
+import {conversationMode} from '../../../packages/dsh-social-bridge-plugin/conversation-policy.mjs';
+const modeFor=key=>conversationMode(config.search_policy_file?JSON.parse(fs.readFileSync(config.search_policy_file,'utf8').replace(/^\uFEFF/,'' )).wechat:wechat,key);
+const searchPolicyFor=key=>searchPolicy(config.search_policy_file?JSON.parse(fs.readFileSync(config.search_policy_file,'utf8').replace(/^\uFEFF/,'' )).wechat:wechat,key);
+const searchStateFor=async message=>{
+  const key=buildConversationKey(message.platform,message.kind,message.conversation_id);
+  if(!searchPolicyFor(key).enabled)return null;
+  return await plugin.modelSearchReady()?{status:'model'}:{status:'unavailable',message:'联网搜索已开启，但 DSH 网页搜索拓展未就绪，请在本机完整退出 DSH 后重新启动。'};
+};
 const adapter = new WechatOneBotAdapter({ server: { host: '127.0.0.1', ...(wechat.onebot?.server ?? {}),
   token: process.env.SOCIAL_ONEBOT_TOKEN ?? '' } }, log);
 const personaFor = (key) => socialPersona(config, key, (roleName) => {
@@ -38,15 +45,16 @@ const personaFor = (key) => socialPersona(config, key, (roleName) => {
 const engine = new SocialEngine({ buffer, roleFor: key => personaFor(key).persona,
   personaNameFor: key => personaFor(key).personaName,
   wakeWords: wechat.wake_words ?? [],
-  mode: wechat.wake_mode ?? 'hybrid', batchMs: config.social?.batch_ms ?? 3000,
+  mode: wechat.wake_mode ?? 'hybrid',modeFor, batchMs: config.social?.batch_ms ?? 3000,
   minIntervalMs: config.social?.min_interval_ms ?? 15000,
   privateMinIntervalMs: config.social?.private_min_interval_ms ?? 1000,
   maxPerMinute: config.social?.max_per_minute ?? 3,
   maxPerTenMinutes: config.social?.max_per_ten_minutes ?? 10,
   decide: (key, prompt, metadata) => plugin.followup(key, prompt, metadata),
-  searchFor:async(message,rows,batchId)=>{const key=buildConversationKey(message.platform,message.kind,message.conversation_id);if(!search.policy(key).enabled)return null;return await plugin.searchReady()?search.prepare(key,rows,batchId):{status:'unavailable'};},
-  searchPolicyFor:message=>search.policy(buildConversationKey(message.platform,message.kind,message.conversation_id)),
-  stickerChoicesFor: message=>adapter.stickerChoices({kind:message.kind,target:message.conversation_id}),
+  modelSearchReady:()=>plugin.modelSearchReady(),
+  searchFor:searchStateFor,
+  searchPolicyFor:message=>searchPolicyFor(buildConversationKey(message.platform,message.kind,message.conversation_id)),
+  stickerChoicesFor: message=>adapter.stickerChoices({kind:message.kind,target:message.conversation_id,query:message.text}),
   stickerPolicyFor: message=>stickerPolicy(config.sticker_policy_file?JSON.parse(fs.readFileSync(config.sticker_policy_file,'utf8').replace(/^\uFEFF/,'' )).wechat:wechat,buildConversationKey(message.platform,message.kind,message.conversation_id)),
   stickerLabelsFor: (message,ids)=>adapter.stickerLabels({kind:message.kind,target:message.conversation_id,ids}),
   saveStickerLabels: (message,labels)=>adapter.saveStickerLabels({kind:message.kind,target:message.conversation_id,labels}),
@@ -55,7 +63,7 @@ const engine = new SocialEngine({ buffer, roleFor: key => personaFor(key).person
 const proactive=new ProactiveEngine({stateFile:path.resolve(config.proactive_state_file??path.join(root,'state/proactive/state.json')),
   buffer,social:engine,settingsFor:()=>config.proactive_policy_file?JSON.parse(fs.readFileSync(config.proactive_policy_file,'utf8').replace(/^\uFEFF/,'')):{wechat},
   personaFor,decide:(key,prompt,metadata)=>plugin.followup(key,prompt,metadata),
-  searchFor:async(message,rows,batchId)=>{const key=buildConversationKey(message.platform,message.kind,message.conversation_id);if(!search.policy(key).enabled)return null;return await plugin.searchReady()?search.prepare(key,rows,batchId):{status:'unavailable'};},
+  searchFor:searchStateFor,
   send:(message,text,options)=>adapter.sendText({kind:message.kind,target:message.conversation_id,text,...options}),
   isReady:()=>adapter.stats.connected&&!!adapter.selfId,selfIdFor:()=>adapter.selfId,log});
 const contextMaintenance = new ContextMaintenance({ buffer, social: engine,

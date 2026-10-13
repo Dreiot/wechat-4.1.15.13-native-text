@@ -4,13 +4,14 @@ import { initAppearance } from './appearance.js';
 import { installExternalLinks } from './external-links.js';
 import { startUpdateUI } from './updates.js';
 import { createExtensionUI } from './extensions.js';
+import {mergeConversationSave} from './conversation-settings.mjs';
 const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const icon = name => `<svg aria-hidden="true"><use href="/icons.svg#${name}"></use></svg>`;
 const state = { token: '', config: null, draft: null, revision: '', page: 'overview', roles: [], roleDrafts: new Map(), selectedRole: '', chatKind: 'private', names: new Map(), status: null, job: null, logs: null, loading: false, reader: null };
 const roleSaves = new Map();
 installExternalLinks({report:message=>toast(message)});
-const extensionUI = createExtensionUI({api,modal,closeModal,confirmAction,escapeHtml,icon,state,renderPage,toast,onProjectSave:syncExtensionProject});
+const extensionUI = createExtensionUI({api,modal,closeModal,confirmAction,escapeHtml,icon,state,renderPage,toast,onDshSave:(result,key)=>{state.draft=mergeConversationSave(state.config,state.draft,result.config,key);state.config=result.config;state.revision=result.revision;updateDraftUI();refreshStatus();},onProjectSave:syncExtensionProject});
 const pages = {
   setup: ['首次配置', '按下面的步骤连接自己的微信与模型，无需命令行。'],
   overview: ['概览', '微信助手的运行情况，一眼看清。'],
@@ -21,7 +22,7 @@ const pages = {
   connections: ['连接设置', '连接本机微信、读取服务与 DSH。'],
   logs: ['运行日志', '查看最近的运行记录，定位连接与收发问题。'],
   tools: ['工具', '安装、检查与维护，通过按钮完成。'],
-  extensions: ['扩展', '查看内置技能的开启状态和适用聊天。'],
+  extensions: ['扩展', '在 DSH 管理技能与插件，在会话中独立分配能力。'],
 };
 const actions = {
   start: ['启动服务', '正在检查账号与连接，启动通常需要几十秒。'],
@@ -40,10 +41,10 @@ const actions = {
   'sessions-configure': ['同步会话名称', '按聊天名称和当前人格更新 DSH 会话名称。'],
   'sessions-compact': ['压缩上下文', '在同一 DSH 会话内生成摘要，这会调用模型。'],
 };
-const searchDefaults={enabled:false,cache:true,maxResults:3,maxSnippetChars:1200,maxSearchesPerTurn:1,timeoutMs:8000,cacheTtlSeconds:900};
+const searchDefaults={enabled:false,cache:true,maxResults:3,maxSnippetChars:1200,maxSearchesPerTurn:1,timeoutMs:20000,cacheTtlSeconds:900};
 const proactiveDefaults={enabled:false,mode:'mixed',intervalMinutes:240,idleMinutes:120,startTime:'09:00',endTime:'22:00',useSearch:true,jitterMinutes:15};
 const contextDefaults={enabled:false,maxTokens:100000,idleSeconds:60};
-const getPath = (object, path) => {const value=path.split('.').reduce((value,key)=>value?.[key],object);if(value!==undefined)return value;if(['wechat.stickers.enabled','wechat.stickers.labelCache'].includes(path))return true;if(path==='wechat.webReader.enabled')return true;if(path.startsWith('wechat.search.'))return searchDefaults[path.split('.').at(-1)];if(path.startsWith('wechat.proactive.'))return proactiveDefaults[path.split('.').at(-1)];if(path.startsWith('wechat.context.'))return contextDefaults[path.split('.').at(-1)];return value;};
+const getPath = (object, path) => {const value=path.split('.').reduce((value,key)=>value?.[key],object);if(value!==undefined)return value;if(path==='wechat.stickers.collectEnabled')return object.wechat?.stickers?.collectGroups??true;if(path==='wechat.stickers.shareEnabled')return object.wechat?.stickers?.shareGroups??true;if(['wechat.stickers.enabled','wechat.stickers.labelCache','wechat.stickers.collectGroups','wechat.stickers.shareGroups'].includes(path))return true;if(path==='wechat.webReader.enabled')return true;if(path.startsWith('wechat.search.'))return searchDefaults[path.split('.').at(-1)];if(path.startsWith('wechat.proactive.'))return proactiveDefaults[path.split('.').at(-1)];if(path.startsWith('wechat.context.'))return contextDefaults[path.split('.').at(-1)];return value;};
 function syncExtensionProject(result,feature) {
   const previous=state.config, draft=state.draft;
   state.config=result.config;state.revision=result.revision;
@@ -84,11 +85,21 @@ async function api(route, body, retry = true) {
     if (info.root !== state.root) throw new Error('控制台连接到其他项目，请重新打开当前项目入口。');
     state.token = info.token; return api(route, body, false);
   }
-  if (!response.ok) throw new Error(result.error ?? '操作失败，请重试。');
+  if (!response.ok) throw Object.assign(new Error(result.error ?? '操作失败，请重试。'),{status:response.status});
   return result;
 }
-function modal(title, content) { $('#modal-title').textContent = title; $('#modal-content').innerHTML = content; if (!$('#modal').open) $('#modal').showModal(); }
-function closeModal() { $('#modal').close(); }
+let modalLifecycle = {};
+function modal(title, content, options = {}) {
+  modalLifecycle.onClose?.(); modalLifecycle = options;
+  $('#modal').className = options.className ?? '';
+  $('#modal-title').textContent = title; $('#modal-content').innerHTML = content;
+  if (!$('#modal').open) $('#modal').showModal();
+}
+function closeModal(options = {}) {
+  if (options.force !== true && modalLifecycle.beforeClose?.() === false) return;
+  const cleanup = modalLifecycle.onClose; modalLifecycle = {}; cleanup?.();
+  $('#modal').close(); $('#modal').className = '';
+}
 function confirmAction(title, description, label, callback) {
   modal(title, `<p class="modal-description">${escapeHtml(description)}</p><div class="modal-actions"><button class="button" data-close>取消</button><button class="button primary" id="confirm-action">${escapeHtml(label)}</button></div>`);
   $('#confirm-action').addEventListener('click', () => { closeModal(); callback(); }, { once: true });
@@ -115,7 +126,7 @@ function overviewPage() {
   const c = state.draft;
   return `<div class="dashboard-grid">
     <section class="card power-card"><div class="power-top"><div class="power-copy"><span class="eyebrow">微信助手</span><h2 id="power-title">正在检查连接</h2><p id="power-description">等待本机服务响应。</p></div><button class="power-control" id="power-button" data-action="start" aria-label="启动服务">${icon('power')}</button></div><div class="power-bottom"><span id="power-tag" class="status-tag">检查中</span><div class="button-row"><button class="button small" data-action="wechat-open">${icon('chat')}打开微信</button><button class="button small" data-action="restart">${icon('refresh')}重启</button></div></div></section>
-    <section class="card">${header('群聊回复方式', '', '<a class="text-link" href="#behavior">设置' + icon('arrow') + '</a>')}<div id="overview-mode">${modeSelector()}</div><p class="mode-footnote">仅对允许的群聊生效。私聊按现有规则回复。</p></section>
+    <section class="card">${header('群聊默认方式', '', '<a class="text-link" href="#behavior">设置' + icon('arrow') + '</a>')}<div id="overview-mode">${modeSelector()}</div><p class="mode-footnote">用于跟随默认设置的群聊；可在会话设置为每个群单独选择。私聊按现有规则回复。</p></section>
     <section class="card wide">${header('连接检查', '', '<a class="text-link" href="#connections">连接设置' + icon('arrow') + '</a>')}<div class="service-track" id="service-track"><div class="loading-state">检查本机连接中…</div></div></section>
     <div class="metrics wide"><section class="card"><div class="metric-label">${icon('chat')}缓存消息</div><div class="metric-value" id="metric-messages">—<span>条</span></div><p class="metric-note" id="metric-note">本机保留的消息记录</p></section><section class="card"><div class="metric-label">${icon('person')}允许的好友</div><div class="metric-value">${c.wechat.whitelist.private.length}<span>位</span></div><a class="text-link metric-note" href="#chats">管理聊天范围 ${icon('arrow')}</a></section><section class="card"><div class="metric-label">${icon('users')}允许的群聊</div><div class="metric-value">${c.wechat.whitelist.groups.length}<span>个</span></div><p class="metric-note">独立人格与会话上下文</p></section></div>
     <section class="card">${header('最近记录', '', '<a class="text-link" href="#sessions">查看会话' + icon('arrow') + '</a>')}<div id="recent-list"><div class="loading-state">读取记录中…</div></div></section>
@@ -124,7 +135,11 @@ function overviewPage() {
 }
 function paintStatus() {
   const s = state.status; if (!s) return;
-  $('#connection-label').innerHTML = `<i class="dot online"></i>本机已连接`;
+  const busy = state.job?.state === 'running';
+  const statusText = busy ? '正在操作' : s.ready ? '机器人运行中' : s.running ? '连接待完成' : '服务未启动';
+  $('#connection-label').innerHTML = '<i class="dot '+(s.ready&&!busy?'online':'warning')+'"></i><span>'+statusText+'</span>';
+  $('#connection-label').title = '控制台已连接。'+statusText+'，点击查看连接详情。';
+  $('#connection-label').setAttribute('aria-label',statusText+'，查看连接详情');
   $('#updated-label').textContent = '更新于 ' + new Date(s.updatedAt).toLocaleTimeString('zh-CN', { hour12: false });
   $('#pending-banner').hidden = !s.pendingApply && !s.dshRestartRequired;
   $('#pending-message').textContent = s.dshRestartRequired ? '模型或插件端口有更改：先在工具页准备配置，从托盘退出并重开 DSH，再重启服务。' : '设置已保存，重启服务后生效。';
@@ -143,21 +158,20 @@ function paintStatus() {
 function roleOptions(value, includeDefault = false) {
   return (includeDefault ? '<option value="">跟随默认人格</option>' : '') + state.roles.map(r => `<option value="${escapeHtml(r.name)}" ${r.name === value ? 'selected' : ''}>${escapeHtml(r.name)}</option>`).join('');
 }
+function conversationSummary(key) {
+  const c=state.draft, a=c.wechat.dshAccess?.chats?.[key]??{}, role=c.persona.chats?.[key]??c.persona.default;
+  const mode=c.wechat.chatModes?.[key]??c.wechat.wake_mode;
+  return '<p class="conversation-summary">人格：'+escapeHtml(role)+(key.includes(':group:')?' · '+(mode==='mention'?'唤醒后回复':'自然参与'):'')+'</p><p class="conversation-summary">'+(a.skills?.length??0)+' 个技能 · '+(a.tools?.length??0)+' 个插件工具</p>';
+}
 function chatsPage() {
-  const kind = state.chatKind; const list = state.draft.wechat.whitelist[kind];
-  return `<section class="card"><div class="page-toolbar"><div class="segmented" aria-label="聊天类型"><button data-kind="private" class="${kind === 'private' ? 'selected' : ''}" aria-pressed="${kind === 'private'}">好友 · ${state.draft.wechat.whitelist.private.length}</button><button data-kind="groups" class="${kind === 'groups' ? 'selected' : ''}" aria-pressed="${kind === 'groups'}">群聊 · ${state.draft.wechat.whitelist.groups.length}</button></div><button class="button primary" id="add-chat">${icon('plus')}添加${kind === 'groups' ? '群聊' : '好友'}</button></div>
-    ${list.length ? `<div class="table-wrap"><table><thead><tr><th>聊天</th><th>人格</th><th>表情发送</th><th>联网搜索</th><th>主动聊天</th><th>上下文上限 / token</th><th>回复权限</th><th></th></tr></thead><tbody>${list.map(id => {
-      const key = `wechat:${kind === 'groups' ? 'group' : 'private'}:${id}`; const name = state.names.get(key);
-      const stickerValue=state.draft.wechat.stickers?.chats?.[key];
-      const stickerOptions=[['inherit','继承全局',stickerValue===undefined],['on','开启',stickerValue===true],['off','关闭',stickerValue===false]].map(([value,label,selected])=>`<option value="${value}" ${selected?'selected':''}>${label}</option>`).join('');
-      const searchValue=state.draft.wechat.search?.chats?.[key];
-      const searchOptions=[['inherit','继承全局',searchValue===undefined],['on','开启',searchValue===true],['off','关闭',searchValue===false]].map(([value,label,selected])=>`<option value="${value}" ${selected?'selected':''}>${label}</option>`).join('');
-      const proactiveOn=state.draft.wechat.proactive?.chats?.[key]===true;
-      const proactiveSelect=`<select class="table-select" data-proactive-key="${key}" aria-label="${escapeHtml(name||id)}的主动聊天"><option value="off" ${!proactiveOn?'selected':''}>关闭</option><option value="on" ${proactiveOn?'selected':''}>开启</option></select>`;
-      const contextLimit=`<input class="table-select context-limit" type="number" min="0" max="2000000" step="1" value="${state.draft.wechat.context?.chats?.[key]??''}" placeholder="继承 ${getPath(state.draft,'wechat.context.maxTokens')}" data-context-key="${key}" aria-label="${escapeHtml(name||id)}的上下文token上限" title="留空继承全局，0 关闭；启用值至少 4000 token">`;
-      return `<tr><td><div class="name-cell"><span class="avatar">${icon(kind === 'groups' ? 'users' : 'person')}</span><div><strong>${escapeHtml(name || (kind === 'groups' ? '群聊' : '好友') + ' · ' + String(id).slice(-4))}</strong><small class="mono">ID ${escapeHtml(id)}</small></div></div></td><td><select class="table-select" data-persona-key="${key}" aria-label="${escapeHtml(name || id)}的人格">${roleOptions(state.draft.persona.chats?.[key], true)}</select></td><td><select class="table-select" data-sticker-key="${key}" aria-label="${escapeHtml(name || id)}的表情发送">${stickerOptions}</select></td><td><select class="table-select" data-search-key="${key}" aria-label="${escapeHtml(name || id)}的联网搜索">${searchOptions}</select></td><td>${proactiveSelect}</td><td>${contextLimit}</td><td><span class="status-tag ok">已允许</span></td><td class="row-actions"><button class="icon-button" data-remove-id="${id}" aria-label="移出聊天范围 ${escapeHtml(name || id)}" title="移出聊天范围">${icon('close')}</button></td></tr>`;
-    }).join('')}</tbody></table></div>` : empty(kind === 'groups' ? '尚未允许任何群聊' : '尚未允许任何好友', '点击添加，搜索聊天名称并勾选；也可以填写已有的数字 ID。', '<button class="button" id="empty-add-chat">' + icon('plus') + '添加聊天</button>', 'users')}
-    <div class="notice plain">${icon('shield')}<span>表情、联网、主动聊天和上下文阈值保存后生效。主动聊天还需在回复设置开启总开关，只向你逐个选中的聊天发送。聊天范围与人格等其他更改需重启应用。</span></div></section>`;
+  const kind=state.chatKind,list=state.draft.wechat.whitelist[kind];
+  return '<section class="card"><div class="page-toolbar"><div class="segmented" aria-label="聊天类型"><button data-kind="private" class="'+(kind==='private'?'selected':'')+'" aria-pressed="'+(kind==='private')+'">好友 · '+state.draft.wechat.whitelist.private.length+'</button><button data-kind="groups" class="'+(kind==='groups'?'selected':'')+'" aria-pressed="'+(kind==='groups')+'">群聊 · '+state.draft.wechat.whitelist.groups.length+'</button></div><button class="button primary" id="add-chat">'+icon('plus')+'添加'+(kind==='groups'?'群聊':'好友')+'</button></div>'+
+    (list.length?'<div class="conversation-list">'+list.map(id=>{
+      const key='wechat:'+(kind==='groups'?'group':'private')+':'+id,name=state.names.get(key)||('群聊好友'.slice(kind==='groups'?0:2,kind==='groups'?2:4)+' · '+String(id).slice(-4));
+      const saved=state.config.wechat.whitelist[kind].some(value=>String(value)===String(id));
+      return '<article class="conversation-row"><div class="conversation-main"><div class="name-cell"><span class="avatar">'+icon(kind==='groups'?'users':'person')+'</span><div><h3>'+escapeHtml(name)+'</h3><small class="mono">ID '+escapeHtml(id)+'</small></div></div>'+conversationSummary(key)+'</div><div class="conversation-row-actions"><span class="status-tag '+(saved?'ok':'warn')+'">'+(saved?'已允许':'新增待保存')+'</span><div class="button-row"><button class="button small" data-chat-settings="'+key+'" aria-label="设置 '+escapeHtml(name)+'" '+(!saved?'disabled title="请先保存聊天范围"':'')+'>'+icon('sliders')+'会话设置</button><button class="button small" data-dsh-chat="'+key+'" aria-label="分配技能与工具 '+escapeHtml(name)+'" '+(!saved?'disabled title="请先保存聊天范围"':'')+'>'+icon('plug')+'技能与工具</button><button class="icon-button" data-remove-id="'+id+'" aria-label="移出聊天范围 '+escapeHtml(name)+'" title="移出聊天范围">'+icon('close')+'</button></div></div></article>';
+    }).join('')+'</div>':empty(kind==='groups'?'尚未允许任何群聊':'尚未允许任何好友','点击添加，搜索聊天名称并勾选；也可以填写已有的数字 ID。','<button class="button" id="empty-add-chat">'+icon('plus')+'添加聊天</button>','users'))+
+    '<div class="notice plain">'+icon('info')+'<span>会话设置独立保存，仅影响当前聊天。新增或移出聊天请点击底部“保存设置”，再重启服务应用。</span></div></section>';
 }
 function addChats() {
   const kind = state.chatKind; const picked = new Map();
@@ -266,12 +280,12 @@ function contextSettingsCard() {
   return `<section class="card context-settings">${header('上下文上限与自动压缩', '每个聊天独立统计，达到阈值后等待空闲再压缩。', '', 'history')}${toggle('启用空闲时自动压缩', 'wechat.context.enabled', '只作用于聊天范围中的好友和群聊；沿用同一个会话，保留原始记录。')}<div class="form-grid space-top">${field('默认上下文阈值 / token', 'wechat.context.maxTokens', {type:'number',min:4000,max:2000000,step:1,help:'默认 100,000。按 DSH 当前有效上下文统计；是压缩触发阈值，正在回复时可能暂时超过。'})}${field('聊天至少空闲 / 秒', 'wechat.context.idleSeconds', {type:'number',min:15,max:3600,step:1,help:'默认 60 秒。没有待回复消息、模型运行或发送任务时才压缩。'})}</div><p class="subtle space-top">可在聊天范围为单个聊天修改阈值，留空继承全局，填 0 关闭。每 30 秒检查，保存后生效。压缩会调用一次摘要模型；失败后等待重试，同一段未变化的上下文最多尝试 3 次。</p></section>`;
 }
 function behaviorPage() {
-  return `<div class="section-stack"><section class="card">${header('群聊参与', '聊天范围中的群聊使用以下方式。', '', 'chat')}<div id="behavior-mode">${modeSelector()}</div><div class="form-grid space-top">${field('唤醒词', 'wechat.wake_words', { transform: 'lines', help: '每行一个。群里识别这些文字后进入回复判断。', placeholder: '小助手' })}${field('账号昵称提示', 'account.nicknames', { transform: 'lines', help: '每行一个。填写账号在聊天中使用的昵称。' })}</div><div class="notice plain">${icon('info')}<span>“自然参与”也会判断普通群消息，选择沉默时仍可能调用模型。拍一拍回应继续使用原有规则。</span></div></section>
+  return `<div class="section-stack"><section class="card">${header('群聊参与', '默认方式，可在聊天范围为每个群单独选择。', '', 'chat')}<div id="behavior-mode">${modeSelector()}</div><div class="form-grid space-top">${field('唤醒词', 'wechat.wake_words', { transform: 'lines', help: '每行一个。群里识别这些文字后进入回复判断。', placeholder: '小助手' })}${field('账号昵称提示', 'account.nicknames', { transform: 'lines', help: '每行一个。填写账号在聊天中使用的昵称。' })}</div><div class="notice plain">${icon('info')}<span>“自然参与”也会判断普通群消息，选择沉默时仍可能调用模型。拍一拍回应继续使用原有规则。</span></div></section>
     <section class="card">${header('回复节奏', '控制消息合并、发送间隔与群聊频率。', '', 'sliders')}<div class="form-grid">${field('消息合并等待 / 秒', 'social.batch_ms', { type: 'number', transform: 'seconds', min: 0, max: 60, step: .1, help: '把短时间内收到的消息合并到同一轮判断。' })}${field('私聊回复最小间隔 / 秒', 'social.private_min_interval_ms', { type: 'number', transform: 'seconds', min: 0, max: 3600, step: .1 })}${field('群聊回复最小间隔 / 秒', 'social.min_interval_ms', { type: 'number', transform: 'seconds', min: 0, max: 3600, step: 1 })}${field('每分钟群回复上限 / 条', 'social.max_per_minute', { type: 'number', min: 1, max: 1000, step: 1 })}${field('每十分钟群回复上限 / 条', 'social.max_per_ten_minutes', { type: 'number', min: 1, max: 10000, step: 1 })}</div></section>
     <section class="card">${header('按人设主动聊天', '让当前人格自然找话题或问候，不强迫每次开口。', '', 'chat')}${toggle('启用定时主动聊天', 'wechat.proactive.enabled', '总开关。还需在聊天范围中逐个开启好友或群聊，默认不向任何聊天主动发送。')}${toggle('允许使用热点与新梗资料', 'wechat.proactive.useSearch', '仅在联网搜索对该聊天也开启时生效。资料不适合人设或无法取得时，改为问候或沉默。')}<div class="form-grid space-top"><div class="field full"><label for="field-proactive-mode">主动内容方向</label><select id="field-proactive-mode" data-path="wechat.proactive.mode">${[['mixed','问候、热点、新梗轮换'],['greeting','问候与生活关心'],['news','人设适合的实时热点'],['meme','人设适合的新梗 / meme']].map(([value,label])=>`<option value="${value}" ${getPath(state.draft,'wechat.proactive.mode')===value?'selected':''}>${label}</option>`).join('')}</select></div>${field('主动机会间隔 / 分钟','wechat.proactive.intervalMinutes',{type:'number',min:30,max:1440,step:1,help:'默认 240 分钟。启用后等待一个间隔，再开始考虑；模型可选择沉默。'})}${field('聊天至少安静 / 分钟','wechat.proactive.idleMinutes',{type:'number',min:5,max:1440,step:1,help:'默认 120 分钟。有新消息、待回复或正在发言时让路。'})}${field('允许开始时间 / 北京时间','wechat.proactive.startTime',{type:'time'})}${field('允许结束时间 / 北京时间','wechat.proactive.endTime',{type:'time'})}${field('随机延迟上限 / 分钟','wechat.proactive.jitterMinutes',{type:'number',min:0,max:60,step:1,help:'在间隔上增加少量随机延迟，使问候不总卡在同一时刻。'})}</div><p class="subtle">保存后一分钟内应用。沿用每个聊天当前的人设、关系和上下文；热点与梗不合适就不讲。避免重复话题和催促回复，好友明确要求不被主动打扰时暂停，直到其再次主动聊天。重启不会补发过期草稿。每个符合条件的主动机会可能调用一次模型，选择沉默也会产生模型消耗。</p></section>
-    <section class="card">${header('原生表情发送', '使用独立开关控制能力，继续沿用当前人格。', '', 'chat')}${toggle('允许发送原生表情包', 'wechat.stickers.enabled', '全局默认值；可在聊天范围中为好友或群聊单独开启或关闭。保存后生效，关闭保留已下载资源。')}${toggle('学习并复用表情标签', 'wechat.stickers.labelCache', '正常看图时顺便保存内容与情绪标签，不额外调用模型。已识别表情优先使用文字标签，减少重复看图。关闭保留缓存。')}</section>
+    <section class="card">${header('原生表情发送', '使用独立开关控制能力，继续沿用当前人格。', '', 'chat')}${toggle('允许发送原生表情包', 'wechat.stickers.enabled', '全局默认值；可在聊天范围中为好友或群聊单独开启或关闭。保存后生效，关闭保留已下载资源。')}${toggle('学习并复用表情标签', 'wechat.stickers.labelCache', '正常看图时顺便保存内容与情绪标签，不额外调用模型。已识别表情优先使用文字标签，减少重复看图。关闭保留缓存。')}${toggle('收集已允许聊天的表情', 'wechat.stickers.collectEnabled', '收集聊天范围中的好友和群聊表情，不要求机器人回复。前 50 张去重后入池，满池的新候选交给 DS 选择。关闭保留已有池子。')}${toggle('好友与群聊共享同一表情池', 'wechat.stickers.shareEnabled', '同一账号的所有已允许好友与群聊共享最多 50 张表情。关闭后仅使用本聊天来源；未允许的聊天和其他账号不参与。')}<p id="sticker-pool-status" class="card-description" role="status">启动读取服务后显示表情池状态。</p><p class="card-description">池子最多 50 张。满池筛选会调用当前 DS 模型，可能消耗额度；模型会参考预览、标签和使用情况，失败时保留现有表情。动态 GIF 保留动画。缺失本机资源时需开启腾讯表情下载。</p></section>
     <section class="card">${header('内置技能', '模型默认具备网页阅读能力，无需导入或配置密钥。', '', 'search')}${toggle('网页阅读', 'wechat.webReader.enabled', '默认开启。发来公开链接并要求阅读、总结或分析时，模型会读取实际正文；独立于下方联网搜索开关，保存后生效。')}<p class="subtle">例如：总结这个网页：https://example.com 。每轮最多三页，每页最多 12,000 字符；需要登录、验证码或执行 JavaScript 的页面可能无法读取。网页资料会提交给当前模型，工具调用与后续总结会产生模型消耗。</p></section>
-    <section class="card">${header('联网搜索', '按需搜索，以每轮回复的次数上限控制；不设每日额度。', '', 'search')}${toggle('允许联网搜索', 'wechat.search.enabled', '“帮我搜”、天气和最新信息问题触发；普通闲聊不搜索。可在聊天范围中为好友或群聊单独覆盖，保存后生效。')}${toggle('复用短期搜索缓存', 'wechat.search.cache', '相同问题复用摘要，天气与实时信息缓存最多两分钟。缓存命中不发起新的联网请求。')}<div class="form-grid space-top">${field('每轮回复最多搜索 / 次', 'wechat.search.maxSearchesPerTurn', {type:'number',min:1,max:3,step:1,help:'默认 1 次。合并消息有多个明确查询时，最多处理这个数量；失败不会自动重试。新一轮回复重新计数。'})}${field('每轮搜索摘要最大长度 / 字符', 'wechat.search.maxSnippetChars', {type:'number',min:256,max:3000,step:1,help:'只提供截断后的摘要与来源，不把整篇网页反复放入上下文。'})}${field('搜索结果上限 / 条', 'wechat.search.maxResults', {type:'number',min:1,max:3,step:1})}${field('普通摘要缓存 / 秒', 'wechat.search.cacheTtlSeconds', {type:'number',min:60,max:3600,step:1})}${field('搜索超时 / 秒', 'wechat.search.timeoutMs', {type:'number',transform:'seconds',min:1,max:12,step:1})}</div><p class="subtle">沿用当前模型与推理设置，不强制修改输出 token 参数。次数上限约束每轮搜索次数，单次模型消耗仍取决于模型和已有上下文。完整搜索摘要会在该轮完成后退出后续上下文。天气查询使用 Open-Meteo 预报，缺少城市时会询问；普通查询使用 Bing 摘要并过滤明显不相关的结果。无需填写密钥，天气公共接口限个人及非商业使用。</p></section>
+    <section class="card">${header('联网搜索', '按需搜索，以每轮回复的次数上限控制；不设每日额度。', '', 'search')}${toggle('允许联网搜索', 'wechat.search.enabled', '模型结合当前问题和前文按需搜索，无需提供网址；普通闲聊不搜索。可在聊天范围中为好友或群聊单独覆盖，保存后生效。')}${toggle('复用短期搜索缓存', 'wechat.search.cache', '相同问题复用摘要，天气与实时信息缓存最多两分钟。缓存命中不发起新的联网请求。')}<div class="form-grid space-top">${field('每轮回复最多搜索 / 次', 'wechat.search.maxSearchesPerTurn', {type:'number',min:1,max:3,step:1,help:'默认 1 次，限制模型调用本拓展的次数。直接调用 DSH 网页搜索；服务内部检索由 DSH 自身设置控制。新一轮回复重新计数。'})}${field('每轮搜索摘要最大长度 / 字符', 'wechat.search.maxSnippetChars', {type:'number',min:256,max:3000,step:1,help:'只提供截断后的摘要与来源，不把整篇网页反复放入上下文。'})}${field('搜索结果上限 / 条', 'wechat.search.maxResults', {type:'number',min:1,max:3,step:1})}${field('普通摘要缓存 / 秒', 'wechat.search.cacheTtlSeconds', {type:'number',min:60,max:3600,step:1})}${field('搜索超时 / 秒', 'wechat.search.timeoutMs', {type:'number',transform:'seconds',min:1,max:60,step:1,help:'默认 20 秒。DSH 原生搜索需要等待服务端返回；本次 DSH 搜索使用完整超时。已有较短设置可调整为 20–30 秒。'})}</div><p class="subtle">沿用当前模型与推理设置，不强制修改输出 token 参数。次数上限约束每轮搜索次数，单次模型消耗仍取决于模型和已有上下文。完整搜索摘要会在该轮完成后退出后续上下文。天气和热点也通过 DSH 网页搜索核实，缺少城市时会询问；直接调用 DSH 网页搜索，沿用当前账号及 DSH 搜索配置。服务不可用时明确返回原因。无需另外填写搜索密钥，DSH 登录和搜索服务需正常可用。网页正文读取失败不代表搜索失败。天气公共接口限个人及非商业使用。</p></section>
     <section class="card">${header('图片与表情包', '普通图片继续从本机读取；以下选项仅影响表情包。', '', 'folder')}${toggle('允许从腾讯下载缺失的表情包', 'wechat.media.allowStickerCdn', '本机缓存缺失时，用白名单原消息提供的地址下载，并核验原消息摘要。')}${toggle('允许兼容旧版表情包地址', 'wechat.media.allowStickerCdnAlias', '将旧腾讯域名映射至兼容域名，仍使用 HTTPS 并核验摘要。')}</section></div>`;
 }
 function readerConfigurationCard() {
@@ -319,7 +333,7 @@ async function sessionsPage() {
   const allowed = new Set([...state.config.wechat.whitelist.private.map(id => 'wechat:private:' + id), ...state.config.wechat.whitelist.groups.map(id => 'wechat:group:' + id)]);
   const list = sessions.filter(session => allowed.has(session.conversationKey));
   const missing = [...allowed].filter(key => !list.some(session => session.conversationKey === key));
-  return `<div class="section-stack"><div class="notice plain">${icon('info')}<span>压缩保留当前会话，需要额外调用模型。要归档会话，请在 DSH 中归档；新消息会按现有规则创建新会话。</span></div>${list.length ? `<div class="session-grid">${list.map(session => `<section class="card session-card">${header(escapeHtml(session.title || state.names.get(session.conversationKey) || session.conversationKey), '', '<span class="status-tag ok">独立上下文</span>')}<div class="session-id">${escapeHtml(session.conversationKey)}</div><div class="session-id">Session · ${escapeHtml(session.sessionId)}</div><div class="session-details"><div><strong>${session.initializations}</strong><span>人格初始化</span></div><div><strong>${session.compactions}</strong><span>上下文压缩</span></div><div><strong>${session.previousSessionCount}</strong><span>历史会话</span></div></div><p class="context-session-status">当前上下文：${Number.isSafeInteger(session.contextTokens)?session.contextTokens.toLocaleString()+" token":"等待统计"}${session.contextTokenSource==="estimated"?"（估算）":""} · 阈值：${state.draft.wechat.context?.chats?.[session.conversationKey]===0?"本聊天关闭":(state.draft.wechat.context?.chats?.[session.conversationKey]??getPath(state.draft,"wechat.context.maxTokens")).toLocaleString()+" token"}${session.contextAuto?.status==="compacting"?" · 正在压缩":session.contextAuto?.status==="failed"?" · 等待重试":""}</p><div class="button-row"><button class="button" data-action="sessions-configure" data-key="${session.conversationKey}">同步名称</button><button class="button" data-action="sessions-compact" data-key="${session.conversationKey}">${icon('history')}压缩上下文</button></div></section>`).join('')}</div>` : `<section class="card">${empty('还没有已允许聊天的原生会话', '收到新消息后会自动建立；也可以用下方按钮初始化已保存的聊天。', '', 'history')}</section>`}${missing.length ? `<section class="card">${header('等待初始化的聊天')}<div class="section-stack">${missing.map(key => `<div class="tool-row"><div><h3>${escapeHtml(state.names.get(key) || key)}</h3><p>名称来自读取服务；当前聊天需已同步到电脑微信。</p></div><button class="button" data-action="sessions-configure" data-key="${key}">初始化会话</button></div>`).join('')}</div></section>` : ''}</div>`;
+  return `<div class="section-stack"><div class="notice plain">${icon('info')}<span>压缩保留当前会话，需要额外调用模型。要归档会话，请在 DSH 中归档；新消息会按现有规则创建新会话。</span></div>${list.length ? `<div class="session-grid">${list.map(session => `<section class="card session-card">${header(escapeHtml(session.title || state.names.get(session.conversationKey) || session.conversationKey), '', '<span class="status-tag ok">独立上下文</span>')}<div class="session-id">${escapeHtml(session.conversationKey)}</div><div class="session-id">Session · ${escapeHtml(session.sessionId)}</div><div class="session-details"><div><strong>${session.initializations}</strong><span>人格初始化</span></div><div><strong>${session.compactions}</strong><span>上下文压缩</span></div><div><strong>${session.previousSessionCount}</strong><span>历史会话</span></div></div><p class="context-session-status">当前上下文：${Number.isSafeInteger(session.contextTokens)?session.contextTokens.toLocaleString()+" token":"等待统计"}${session.contextTokenSource==="estimated"?"（估算）":""} · 阈值：${state.draft.wechat.context?.chats?.[session.conversationKey]===0?"本聊天关闭":(state.draft.wechat.context?.chats?.[session.conversationKey]??getPath(state.draft,"wechat.context.maxTokens")).toLocaleString()+" token"}${session.contextAuto?.status==="compacting"?" · 正在压缩":session.contextAuto?.status==="failed"?" · 等待重试":""}</p>${conversationSummary(session.conversationKey)}<div class="button-row session-actions"><button class="button" data-chat-settings="${session.conversationKey}">${icon('sliders')}会话设置</button><button class="button" data-dsh-chat="${session.conversationKey}">${icon('plug')}技能与工具</button><button class="button" data-action="sessions-configure" data-key="${session.conversationKey}">同步名称</button><button class="button" data-action="sessions-compact" data-key="${session.conversationKey}">${icon('history')}压缩上下文</button></div></section>`).join('')}</div>` : `<section class="card">${empty('还没有已允许聊天的原生会话', '收到新消息后会自动建立；也可以用下方按钮初始化已保存的聊天。', '', 'history')}</section>`}${missing.length ? `<section class="card">${header('等待初始化的聊天')}<div class="section-stack">${missing.map(key => `<div class="tool-row"><div><h3>${escapeHtml(state.names.get(key) || key)}</h3><p>名称来自读取服务；当前聊天需已同步到电脑微信。</p></div><div class="button-row"><button class="button" data-chat-settings="${key}">会话设置</button><button class="button" data-action="sessions-configure" data-key="${key}">初始化会话</button></div></div>`).join('')}</div></section>` : ''}</div>`;
 }
 async function logsPage() {
   state.logs = await api('/api/logs' + (state.logs?.file ? '?file=' + encodeURIComponent(state.logs.file) : ''));
@@ -334,7 +348,7 @@ async function renderPage() {
   document.querySelectorAll('[data-page]').forEach(a => page === a.dataset.page ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
   let markup;
   try {
-    if (['sessions', 'logs'].includes(page)) $('#page-body').innerHTML = '<div class="loading-state">正在读取…</div>';
+    if (['sessions', 'logs', 'extensions'].includes(page)) $('#page-body').innerHTML = '<div class="loading-state">正在读取…</div>';
     if (page === 'overview') markup = overviewPage();
     if (page === 'chats') markup = chatsPage();
     if (page === 'roles') markup = rolesPage();
@@ -350,6 +364,7 @@ async function renderPage() {
   }
   if (sequence !== renderSequence || state.page !== page) return;
   $('#page-body').innerHTML = markup; updateDraftUI(); paintStatus(); paintReaderSetup();
+  if(page==='behavior')api('/api/sticker-pool').then(pool=>{if(sequence!==renderSequence||!$('#sticker-pool-status'))return;const labels={selected:'DS 已完成评选',waiting_retry:'等待 DS 重试'};$('#sticker-pool-status').textContent='已入池 '+pool.count+'/50 · 待评选 '+(pool.waiting+pool.legacyWaiting)+' · '+(pool.review==='reviewing'?'DS 正在评选':labels[pool.lastReview?.status]??(pool.waiting?'等待 DS 评选':'未满池或没有新候选'));}).catch(()=>{});
   $('#role-content')?.addEventListener('input', event => {
     const role = state.roles.find(r => r.name === state.selectedRole); const content = event.target.value;
     if (content === role.content && !roleSaves.has(role.name)) state.roleDrafts.delete(role.name); else state.roleDrafts.set(role.name, { name: role.name, content, revision: role.revision });
@@ -369,7 +384,9 @@ async function refreshStatus() {
       state.job = state.status.latestJob; paintJob();
     }
   } catch (error) {
-    $('#connection-label').innerHTML = '<i class="dot failed"></i>控制台未连接';
+    $('#connection-label').innerHTML = '<i class="dot failed"></i><span>控制台未连接</span>';
+    $('#connection-label').title = '无法连接本机控制台，点击查看详情。';
+    $('#connection-label').setAttribute('aria-label','控制台未连接，查看详情');
     showError(error.message + ' 若后台控制台已关闭，请重新双击控制台入口。');
     if (state.page === 'overview' && $('#power-button')) { $('#power-title').textContent = '状态暂不可用'; $('#power-button').disabled = true; }
   }
@@ -527,6 +544,7 @@ document.addEventListener('input', event => {
   setPath(state.draft, input.dataset.path, value); updateDraftUI();
 });
 document.addEventListener('change', event => {
+  if(event.target.dataset.wakeKey){const key=event.target.dataset.wakeKey;state.draft.wechat.chatModes??={};if(event.target.value==='inherit')delete state.draft.wechat.chatModes[key];else state.draft.wechat.chatModes[key]=event.target.value;updateDraftUI();return;}
   if(event.target.dataset.stickerKey){const key=event.target.dataset.stickerKey;state.draft.wechat.stickers??={};state.draft.wechat.stickers.chats??={};if(event.target.value==='inherit')delete state.draft.wechat.stickers.chats[key];else state.draft.wechat.stickers.chats[key]=event.target.value==='on';updateDraftUI();return;}
   if(event.target.dataset.searchKey){const key=event.target.dataset.searchKey;state.draft.wechat.search??={};state.draft.wechat.search.chats??={};if(event.target.value==='inherit')delete state.draft.wechat.search.chats[key];else state.draft.wechat.search.chats[key]=event.target.value==='on';updateDraftUI();return;}
   if(event.target.dataset.proactiveKey){const key=event.target.dataset.proactiveKey;state.draft.wechat.proactive??={};state.draft.wechat.proactive.chats??={};state.draft.wechat.proactive.chats[key]=event.target.value==='on';updateDraftUI();return;}
@@ -568,11 +586,23 @@ document.addEventListener('click', event => {
 $('#save-button').addEventListener('click', saveAll);
 $('#discard-button').addEventListener('click', () => confirmAction('放弃未保存的更改', '已保存的设置和人格不会受影响。', '放弃更改', () => { state.draft = structuredClone(state.config); state.roleDrafts.clear(); state.readerDraft = null; renderPage(); updateDraftUI(); }));
 $('#modal-close').addEventListener('click', closeModal);
+$('#modal').addEventListener('cancel', event => {event.preventDefault();closeModal();});
 $('#modal').addEventListener('click', event => { if (event.target === $('#modal')) { const bounds = $('#modal').getBoundingClientRect(); if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) closeModal(); } });
 $('#job-close').addEventListener('click', () => { $('#job-panel').hidden = true; if (state.job?.state === 'running') toast('操作继续在后台执行，完成后可刷新查看结果。'); });
 $('#activity-button').addEventListener('click', () => { if (state.job) { $('#job-panel').hidden = false; paintJob(); } });
 $('#job-retry').addEventListener('click', () => { if (state.jobBody?.action === 'reader-connect') saveReader(state.jobBody.autoKey); else if (state.jobBody) runAction(state.jobBody.action, state.jobBody.conversationKey); else toast('请回到对应页面重新执行。'); });
-$('#menu-button').addEventListener('click', () => { document.body.classList.toggle('nav-open'); $('#menu-button').setAttribute('aria-expanded', document.body.classList.contains('nav-open')); });
+const mobileNavigation=matchMedia('(max-width:640px)');
+function paintNavigation() {
+  const open=mobileNavigation.matches&&document.body.classList.contains('nav-open');
+  $('#sidebar').inert=mobileNavigation.matches&&!open;
+  $('#sidebar').setAttribute('aria-hidden',String(mobileNavigation.matches&&!open));
+  $('#menu-button').setAttribute('aria-expanded',String(open));
+  $('#menu-button').setAttribute('aria-label',open?'关闭导航':'打开导航');
+}
+$('#menu-button').addEventListener('click',()=>{document.body.classList.toggle('nav-open');paintNavigation();});
+mobileNavigation.addEventListener('change',()=>{document.body.classList.remove('nav-open');paintNavigation();});
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('#modal').open&&document.body.classList.contains('nav-open')){document.body.classList.remove('nav-open');paintNavigation();$('#menu-button').focus();}});
+paintNavigation();
 $('#quit-console').addEventListener('click', () => {
   if (hasDraft()) return toast('请先保存或放弃草稿，再退出控制台。');
   confirmAction(window.desktop ? '退出应用' : '退出控制台', window.desktop ? '退出 WeChatAgent 桌面应用，微信聊天服务继续运行。下次双击 WeChatAgent.exe 即可重新打开。' : '只关闭本机控制台，微信聊天服务继续运行。下次双击控制台入口即可重新打开。', window.desktop ? '退出应用' : '退出控制台', async () => {
@@ -584,22 +614,30 @@ if (window.desktop) {
   document.body.classList.add('desktop-mode');
   $('.brand span').textContent = '桌面应用';
   $('.breadcrumb > span:first-of-type').textContent = 'WeChatAgent';
-  $('.version').textContent = '0.3.2 · 关闭窗口收起到托盘';
+  $('.version').textContent = '0.3.3 · 关闭窗口收起到托盘';
   $('#quit-console').textContent = '退出应用';
 }
-document.addEventListener('click', event => { if (document.body.classList.contains('nav-open') && !event.target.closest('.sidebar') && !event.target.closest('#menu-button')) document.body.classList.remove('nav-open'); });
-window.addEventListener('hashchange', () => { state.page = pages[location.hash.slice(1)] ? location.hash.slice(1) : 'overview'; document.body.classList.remove('nav-open'); renderPage(); });
-window.addEventListener('beforeunload', event => { if (hasDraft()) { event.preventDefault(); event.returnValue = ''; } });
+document.addEventListener('click', event => { if (document.body.classList.contains('nav-open') && !event.target.closest('.sidebar') && !event.target.closest('#menu-button')) {document.body.classList.remove('nav-open');paintNavigation();} });
+window.addEventListener('hashchange', () => { state.page = pages[location.hash.slice(1)] ? location.hash.slice(1) : 'overview'; document.body.classList.remove('nav-open'); paintNavigation(); renderPage(); });
+window.addEventListener('beforeunload', event => { if (hasDraft() || document.querySelector('#chat-settings-form [type=submit]:not(:disabled)')) { event.preventDefault(); event.returnValue = ''; } });
 function applyTheme(theme) { document.documentElement.dataset.theme = theme; $('#theme-button').innerHTML = icon(theme === 'dark' ? 'sun' : 'moon'); $('#theme-button').setAttribute('aria-label', theme === 'dark' ? '切换浅色主题' : '切换深色主题'); window.desktop?.setTheme(theme).catch(() => {}); }
 let savedTheme; try { savedTheme = localStorage.getItem('wechatagent-console-theme'); } catch {}
 applyTheme(window.desktop?.initialTheme ?? (savedTheme === 'dark' || savedTheme === 'light' ? savedTheme : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
 $('#theme-button').addEventListener('click', () => { const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; applyTheme(theme); try { localStorage.setItem('wechatagent-console-theme', theme); } catch {} });
 initAppearance({modal,closeModal,toast,escapeHtml,icon});
 $('#refresh-button').addEventListener('click', async () => {
-  if (!state.config) { try { await load(); } catch (error) { showError(error.message); } return; }
-  if (hasDraft()) { await refreshStatus(); toast('状态已刷新，未保存的草稿已保留。'); return; }
-  try { const config = await api('/api/config'); state.config = config.config; state.draft = structuredClone(config.config); state.revision = config.revision; state.roles = (await api('/api/roles')).roles; state.reader = null; state.readerDraft = null; await renderPage(); await refreshStatus(); }
-  catch (error) { showError(error.message); }
+  if (state.refreshing) return;
+  const button=$('#refresh-button'); state.refreshing=true;button.disabled=true;button.classList.add('is-refreshing');button.setAttribute('aria-label','正在刷新');
+  try {
+    if (!state.config) { await load(); return; }
+    if (hasDraft()) { await refreshStatus(); toast('状态已刷新，未保存的草稿已保留。'); return; }
+    const [config,roles]=await Promise.all([api('/api/config'),api('/api/roles')]);
+    // A user can begin editing while the refresh request is in flight.
+    if (hasDraft()) {await refreshStatus();toast('状态已刷新，新输入的草稿已保留。');return;}
+    state.config=config.config;state.draft=structuredClone(config.config);state.revision=config.revision;state.roles=roles.roles;state.reader=null;state.readerDraft=null;
+    await renderPage();await refreshStatus();
+  } catch(error) {showError(error.message);}
+  finally {state.refreshing=false;button.disabled=false;button.classList.remove('is-refreshing');button.setAttribute('aria-label','刷新当前页面');}
 });
-load().catch(error => { showError(error.message || '控制台未连接，请重新双击控制台入口。'); $('#page-body').innerHTML = empty('暂时无法打开控制台', '检查本机配置后点击右上角刷新，或重新双击控制台入口。', '', 'plug'); });
+load().catch(error => { $('#connection-label').innerHTML='<i class="dot failed"></i><span>控制台未连接</span>'; $('#connection-label').setAttribute('aria-label','控制台未连接，查看详情'); showError(error.message || '控制台未连接，请重新双击控制台入口。'); $('#page-body').innerHTML = empty('暂时无法打开控制台', '检查本机配置后点击右上角刷新，或重新双击控制台入口。', '', 'plug'); });
 setInterval(() => { if (!document.hidden && state.token) refreshStatus(); }, 5000);

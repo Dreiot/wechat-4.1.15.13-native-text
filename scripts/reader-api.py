@@ -18,6 +18,7 @@ import time
 import uuid
 import subprocess
 import concurrent.futures
+import urllib.request
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -28,8 +29,9 @@ from wechat_media import clean_account_wxid
 from wechat_forwarded import FORWARD_TYPE, parse_forwarded_record
 from wechat_quote import QUOTE_TYPE, parse_quote_reply
 from wechat_sticker_send import sticker_send_fields, sticker_receipt_md5, APPMSG_STICKER_TYPE, native_gif_bytes
-from wechat_sticker import emoji_attributes, resolve_sticker_bytes
+from wechat_sticker import emoji_attributes, resolve_sticker_bytes, NoRedirect
 from wechat_sticker_labels import StickerLabels, clean_label
+from wechat_sticker_collection import StickerCollection
 
 PAT_TYPE = (62 << 32) | 49
 
@@ -189,6 +191,9 @@ class Reader:
         self.sticker_retry_at = {}
         self.sticker_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.sticker_labels = StickerLabels(self.root/'state/stickers/labels.json')
+        self.sticker_collection = StickerCollection(self.root,self.account,self.own_wxid,self.sticker_account_active)
+        self.sticker_review_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self.sticker_review_job = None
         self.image_error = ''
         self.stop = threading.Event()
         # Probe actual message shards now; listening on a port is not readiness.
@@ -329,9 +334,21 @@ class Reader:
             temp = self.image_index_file.with_suffix('.tmp')
             temp.write_text(json.dumps(self.image_index), encoding='utf-8')
             temp.replace(self.image_index_file)
+        if descriptor.get('localType')==47:
+            try:
+                key='wechat:'+('group:' if '@chatroom' in talker else 'private:')+conversation_id(talker,self.names)
+                self.sticker_collection.remember(image_id,descriptor,key)
+                self.pump_sticker_collection()
+            except (RuntimeError,ValueError,OSError):
+                print('Sticker collection unavailable; incoming message retained.',flush=True)
         return image_id
 
     def resolve_image(self, image_id):
+        library=getattr(self,'sticker_collection',None)
+        if library:
+            try:preview=library.preview(image_id)
+            except (RuntimeError,ValueError,OSError):preview=None
+            if preview:return preview
         descriptor = self.image_index.get(image_id)
         if not descriptor or descriptor.get('account') != self.account.name or not self.image_talker_allowed(descriptor['talker']):
             raise PermissionError('Image is unavailable or not authorized')
@@ -373,9 +390,10 @@ class Reader:
                 if future.done() and self.image_jobs.get(image_id) is future:
                     self.image_jobs.pop(image_id, None)
 
-    def sticker_candidates(self, key):
+    def sticker_candidates(self, key, query=''):
+        self.pump_sticker_collection()
         candidates=[]
-        for image_id, descriptor in self.image_index.items():
+        for image_id, descriptor in list(self.image_index.items()):
             if descriptor.get('localType')!=47 or descriptor.get('account')!=self.account.name:
                 continue
             talker=descriptor['talker']
@@ -394,17 +412,49 @@ class Reader:
                     future=self.sticker_executor.submit(self.resolve_sticker,candidate['id'],key)
                     self.sticker_jobs[candidate['id']]=future
                     self.sticker_retry_at[candidate['id']]=time.monotonic()+30
-            if future.done() and not future.cancelled() and future.exception() is None:
+            if future.done() and not future.cancelled() and future.exception() is None and isinstance(future.result(),dict):
                 label=None
                 if hasattr(self,'sticker_labels') and self.label_cache_enabled():
                     label=self.sticker_labels.get(self.account.name,future.result()['sourceMd5'])
-                available.append({**candidate,**(label or {})})
-        return available
+                available.append({**candidate,'nativeMd5':future.result().get('fields',{}).get('md5'),**(label or {})})
+        collected=getattr(self,'sticker_collection',None)
+        if collected:
+            try:
+                labels=self.sticker_labels.read()['accounts'].get(self.account.name,{}) if self.label_cache_enabled() else {}
+                def label_for(item):
+                    for md5 in item.get('sourceMd5s',[item['sourceMd5']]):
+                        label=labels.get(md5)
+                        if label and label.get('labelVersion')==1:
+                            try:return clean_label(label)
+                            except ValueError:continue
+                    return None
+                def rank(item):
+                    label=label_for(item)
+                    if not label:return 0
+                    return sum(tag in query for tag in label['tags'])+int(bool(query) and query in label['description'])
+                shared=collected.candidates(key,rank=rank)
+                for item in shared:
+                    label=label_for(item)
+                    item.pop('sourceMd5');item.pop('sourceMd5s')
+                    item.update(label or {})
+                available=shared
+            except (RuntimeError,ValueError,OSError):pass
+        result=[];seen=set()
+        for item in available:
+            identity=item.pop('nativeMd5',None) or item['id']
+            if identity in seen:continue
+            seen.add(identity);result.append(item)
+        return result[:20]
 
     def label_cache_enabled(self):
         return read_json(self.root/'config/wechatagent.json').get('wechat',{}).get('stickers',{}).get('labelCache',True) is True
 
     def sticker_source(self,image_id,key):
+        collected=getattr(self,'sticker_collection',None)
+        if collected:
+            try:resource=collected.resource(image_id,key)
+            except (RuntimeError,ValueError,OSError):resource=None
+            if resource:return resource['sourceMd5']
         descriptor=self.image_index.get(image_id)
         if not descriptor or descriptor.get('localType')!=47 or descriptor.get('account')!=self.account.name:raise PermissionError('Sticker is unavailable')
         talker=descriptor['talker']
@@ -432,7 +482,16 @@ class Reader:
         return {'saved':len(updates)}
 
     def resolve_sticker(self, image_id, key):
+        collected=getattr(self,'sticker_collection',None)
+        if collected:
+            try:resource=collected.resource(image_id,key)
+            except (RuntimeError,ValueError,OSError):resource=None
+            if resource:return resource
+        if collected:raise PermissionError('Sticker is not admitted to the shared pool')
         descriptor=self.image_index.get(image_id)
+        return self.resolve_received_sticker(image_id,key,descriptor)
+
+    def resolve_received_sticker(self,image_id,key,descriptor):
         if not descriptor or descriptor.get('localType')!=47 or descriptor.get('account')!=self.account.name:
             raise PermissionError('Sticker reference is unavailable')
         talker=descriptor['talker']
@@ -452,10 +511,105 @@ class Reader:
         if file.exists() and hashlib.md5(file.read_bytes()).hexdigest()!=fields['md5']:raise RuntimeError('STICKER_CACHE_INTEGRITY_FAILED')
         if not file.exists():
             temp=file.with_suffix(extension+'.'+uuid.uuid4().hex+'.tmp');temp.write_bytes(raw);temp.replace(file)
+        collected=getattr(self,'sticker_collection',None)
+        if collected:
+            try:collected.store(raw,fields,source_md5,current,descriptor['createTime'],image_id)
+            except (RuntimeError,ValueError,OSError):
+                print('Sticker collection unavailable; verified sending resource retained.',flush=True)
         return {'id':image_id,'conversationKey':current,'sourceMd5':source_md5,'format':'gif','fields':fields,'path':str(file.resolve())}
+
+    def sticker_account_active(self):
+        try:
+            settings=read_json(self.settings_file)
+            base=pathlib.Path(local_secret(settings['dbPath']))
+            current=base if (base/'db_storage').is_dir() else base/local_secret(settings['myWxid'])
+            return current.resolve()==self.account.resolve()
+        except (OSError,ValueError,KeyError,RuntimeError):return False
+
+    def pump_sticker_collection(self):
+        library=getattr(self,'sticker_collection',None)
+        if not library:return
+        try:
+            policy=library.policy()
+            if not library.active() or not library.enabled(policy):return
+            media=policy.get('media',{})
+            policy_key=json.dumps([media.get('allowStickerCdn') is True,media.get('allowStickerCdnAlias') is True])
+            pending=library.pending()
+        except (RuntimeError,ValueError,OSError):return
+        with self.lock:
+            active=sum(not future.done() for future in self.sticker_jobs.values())
+            for image_id,item in pending:
+                if active>=16:break
+                previous=self.sticker_jobs.get(image_id)
+                if previous is not None and not previous.done() or time.monotonic()<self.sticker_retry_at.get(image_id,0):continue
+                if not library.attempt(image_id,policy_key):continue
+                self.sticker_jobs[image_id]=self.sticker_executor.submit(self.collect_group_sticker,image_id,item)
+                self.sticker_retry_at[image_id]=time.monotonic()+30;active+=1
+            # Completed bookkeeping must not grow with the lifetime message count.
+            completed=[image_id for image_id,future in self.sticker_jobs.items() if future.done()]
+            for image_id in completed[:-64]:
+                self.sticker_jobs.pop(image_id,None);self.sticker_retry_at.pop(image_id,None)
+
+    def collect_group_sticker(self,image_id,item):
+        library=self.sticker_collection
+        try:
+            if not library.can_collect(item['key']):return
+            return self.resolve_received_sticker(image_id,item['key'],item['descriptor'])
+        except PermissionError:library.forget_pending(image_id)
+        except (RuntimeError,ValueError,OSError):pass
+
+    def sticker_pool_review_packet(self,ticket):
+        library=self.sticker_collection
+        labels=self.sticker_labels.read()['accounts'].get(self.account.name,{})
+        def label_for(item):
+            for md5 in item.get('sourceMd5s',[item['sourceMd5']]):
+                label=labels.get(md5)
+                if label and label.get('labelVersion')==1:
+                    try:return clean_label(label)
+                    except ValueError:continue
+            return None
+        usage={};state=library.read();aliases=state['aliases']
+        buffer=self.root/'state/social-messages.json'
+        if buffer.is_file() and buffer.stat().st_size<=16*1024*1024:
+            for key,rows in read_json(buffer).get('chats',{}).items():
+                if not library.allowed(key):continue
+                for row in rows:
+                    alias=aliases.get(row.get('sticker_id'))
+                    if alias and row.get('outgoing') and row.get('delivery_status')=='confirmed':
+                        record=usage.setdefault(alias['digest'],{'uses':0,'lastUsedAt':0});record['uses']+=1;record['lastUsedAt']=max(record['lastUsedAt'],float(row.get('timestamp',0)))
+        return library.review_packet(ticket,label_for,usage)
+
+    def pump_sticker_pool_review(self):
+        executor=getattr(self,'sticker_review_executor',None)
+        if not executor or getattr(self,'sticker_review_job',None) and not self.sticker_review_job.done():return
+        try:review=self.sticker_collection.claim_review()
+        except (RuntimeError,ValueError,OSError):return
+        if review:self.sticker_review_job=executor.submit(self.review_sticker_pool,review['ticket'])
+
+    def review_sticker_pool(self,ticket):
+        try:
+            config=read_json(self.root/'config/wechatagent.json');token=(self.root/'state/social-dsh-token.txt').read_text(encoding='utf-8-sig').strip()
+            url='http://127.0.0.1:'+str(config['ports']['dshPlugin'])
+            opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
+            request=urllib.request.Request(url+'/health',headers={'Authorization':'Bearer '+token})
+            with opener.open(request,timeout=3) as response:health=json.loads(response.read(65536))
+            if health.get('ok') is not True or health.get('project')!='WeChatAgent' or pathlib.Path(health.get('projectRoot','')).resolve()!=self.root.resolve() or health.get('stickerPoolReview')!='ds-select-v1':raise RuntimeError('STICKER_REVIEW_PROJECT_UNAVAILABLE')
+            if not self.sticker_account_active():raise PermissionError('Account changed')
+            request=urllib.request.Request(url+'/sticker-pool-review',data=json.dumps({'ticket':ticket}).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'},method='POST')
+            with opener.open(request,timeout=75) as response:result=json.loads(response.read(16384))
+            if result.get('ok') is not True or result.get('ticket')!=ticket:raise RuntimeError('STICKER_REVIEW_INVALID_RESULT')
+            self.sticker_collection.apply_review(ticket,result.get('keep'),result.get('reason',''))
+        except (OSError,ValueError,RuntimeError,PermissionError,KeyError):
+            self.sticker_collection.review_failed(ticket)
+            print('Sticker pool full; DS selection pending, current pool retained.',flush=True)
 
     def poll(self):
         since = self.started_at
+        # Migrate only already observed sticker descriptors; do not replay old messages.
+        for image_id,descriptor in list(self.image_index.items()):
+            if descriptor.get('localType')==47:
+                try:self.sticker_collection.remember(image_id,descriptor,'wechat:'+('group:' if '@chatroom' in descriptor['talker'] else 'private:')+conversation_id(descriptor['talker'],self.names))
+                except (RuntimeError,ValueError,OSError):break
         while not self.stop.is_set():
             try:
                 newest = since
@@ -484,6 +638,8 @@ class Reader:
                         self.pushed += 1
                         print('Reader incoming ' + ('sticker' if payload['type'] == 47 else 'image' if payload['type'] == 3 else 'pat' if payload['type'] == PAT_TYPE else 'text') + '; OneBot conversation=' + conversation_id(talker, self.names), flush=True)
                 since = newest
+                self.pump_sticker_collection()
+                self.pump_sticker_pool_review()
                 self.last_poll = time.time()
                 self.last_error = ''
             except Exception as error:
@@ -613,8 +769,12 @@ def serve(reader, port, token):
                         'imagesRegistered': len(reader.image_index), 'lastImageError': reader.image_error})
                 elif re.fullmatch(r'/api/v1/images/[a-f0-9]{64}', url.path):
                     self.respond(reader.resolve_image(url.path.rsplit('/', 1)[1]))
+                elif re.fullmatch(r'/api/v1/stickers/pool-review/[a-f0-9]{64}',url.path):
+                    self.respond(reader.sticker_pool_review_packet(url.path.rsplit('/',1)[1]))
+                elif url.path == '/api/v1/stickers/pool-status':
+                    self.respond(reader.sticker_collection.status())
                 elif url.path == '/api/v1/stickers':
-                    self.respond({'stickers':reader.sticker_candidates(query.get('conversationKey',[''])[0])})
+                    self.respond({'stickers':reader.sticker_candidates(query.get('conversationKey',[''])[0],query.get('query',[''])[0][:500])})
                 elif re.fullmatch(r'/api/v1/stickers/[a-f0-9]{64}',url.path):
                     self.respond(reader.resolve_sticker(url.path.rsplit('/',1)[1],query.get('conversationKey',[''])[0]))
                 else:
@@ -678,6 +838,7 @@ def serve(reader, port, token):
     finally:
         reader.stop.set()
         reader.sticker_executor.shutdown(wait=False,cancel_futures=True)
+        reader.sticker_review_executor.shutdown(wait=False,cancel_futures=True)
         server.server_close()
 
 

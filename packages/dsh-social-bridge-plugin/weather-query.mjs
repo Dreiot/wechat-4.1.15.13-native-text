@@ -6,12 +6,12 @@ const PROVINCES = /^(北京|上海|天津|重庆|浙江|江苏|安徽|福建|江
 export function weatherIntent(value) {
   const text=String(value??'').trim();
   if(!TOPIC.test(text)||BLOCK.test(text)||SCIENCE.test(text)||/CPU|显卡|电脑|水温|体温|发烧|烤箱/i.test(text))return false;
-  return /[？?]|吗|呢|怎样|如何|怎么样|多少|几度|会不会|下不下|冷不冷|热不热|有没有|查|搜|预报|(?:天气|气温)$|^(?:weather|forecast)\b/i.test(text);
+  return /[？?]|吗|呢|怎样|如何|怎么样|咋样|啥天气|多少|几度|会不会|下不下|冷不冷|热不热|有没有|查|搜|预报|(?:天气|气温)$|^(?:weather|forecast)\b/i.test(text);
 }
 export function weatherCity(value) {
   let text=String(value??'').replace(/^@\S+[\s\u2005]+/,'').replace(/^(?:(?:你|您)(?:能不能|可不可以|能否|可以|能)|能不能|可不可以|能否|可以|可否)\s*/,'').replace(/https?:\/\/\S+|\[CQ:[^\]]*\]/gi,' ').replace(DATES,' ')
     .replace(/(?:请问|帮我|帮忙|麻烦|我想知道|我想查|告诉我|我在|我位于|现在在|查询|搜索|查一下|查查|看一下|看看|搜一下|一下|查|搜)/g,' ')
-    .replace(/(?:天气预报|天气|气温|预报|降水概率|降水|降雨|会不会下雨|下不下雨|下雨|会不会下雪|下不下雪|下雪|冷不冷|热不热|多少度|几度|怎么样|怎样|如何|多少|什么|是不是|会不会|有没有|是否|需要带伞|带伞|用不用|要不要|情况|会|的|吗|呢|啊|呀|[？?！!，。;；:：])/g,' ')
+    .replace(/(?:天气预报|天气|气温|预报|降水概率|降水|降雨|会不会下雨|下不下雨|下雨|会不会下雪|下不下雪|下雪|冷不冷|热不热|多少度|几度|怎么样|咋样|怎样|如何|多少|什么|啥|是不是|会不会|有没有|是否|需要带伞|带伞|用不用|要不要|情况|会|的|吗|呢|啊|呀|[？?！!，。;；:：])/g,' ')
     .replace(/\b(?:weather|forecast|today|tomorrow|now|current|in|please|check|for)\b/gi,' ').replace(/\s+/g,' ').trim();
   text=text.replace(/^在\s*/,'');
   if(!text||/^(?:这里|这边|本地|当地|附近|家里|我这里|我们这里|哪[个里]|哪个城市|你好|哈哈|谢谢|不知道|不清楚|不用|算了|取消|没事|好的|行|好)$/.test(text))return null;

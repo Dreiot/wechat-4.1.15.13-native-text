@@ -24,8 +24,8 @@ export function chooseWeatherPlace(results,city){
   calendarDate(Date.now(),matches[0].timezone);return matches[0];
 }
 const number=(value,min,max)=>typeof value==='number'&&Number.isFinite(value)&&value>=min&&value<=max;
-export async function fetchWeather(request,{fetchImpl=fetch,timeoutMs=8000,now=Date.now}={}){
-  const signal=AbortSignal.timeout(timeoutMs),{name,admin}=qualifyWeatherCity(request.city);
+export async function fetchWeather(request,{fetchImpl=fetch,timeoutMs=8000,now=Date.now,signal:parentSignal}={}){
+  const signal=parentSignal?AbortSignal.any([parentSignal,AbortSignal.timeout(timeoutMs)]):AbortSignal.timeout(timeoutMs),{name,admin}=qualifyWeatherCity(request.city);
   const geoUrl=new URL('https://geocoding-api.open-meteo.com/v1/search');geoUrl.searchParams.set('name',admin?name+', '+admin:name);geoUrl.searchParams.set('count','10');geoUrl.searchParams.set('language',/[\p{Script=Han}]/u.test(request.city)?'zh':'en');geoUrl.searchParams.set('format','json');
   const geo=await json(geoUrl,fetchImpl,signal),place=chooseWeatherPlace(geo.results,request.city),at=now(),dates=requestedWeatherDates(request,at,place.timezone);
   const forecastUrl=new URL('https://api.open-meteo.com/v1/forecast');

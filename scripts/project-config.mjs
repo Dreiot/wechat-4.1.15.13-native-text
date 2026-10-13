@@ -10,6 +10,8 @@ import {validateProactiveSettings} from '../components/qq-bridge/src/core/proact
 import { validateContextSettings } from '../packages/dsh-social-bridge-plugin/context-policy.mjs';
 import { validateWebReaderSettings } from '../packages/dsh-social-bridge-plugin/web-reader-policy.mjs';
 
+import {validateConversationSettings,conversationMode} from '../packages/dsh-social-bridge-plugin/conversation-policy.mjs';
+import {migrateDshSettings} from '../packages/dsh-social-bridge-plugin/dsh-migration.mjs';
 export const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (file) => JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
 const write = (file, value) => {
@@ -18,6 +20,7 @@ const write = (file, value) => {
   fs.renameSync(`${file}.tmp`, file);
 };
 export function validateConfig(config) {
+  validateConversationSettings(config.wechat);
   validateStickerSettings(config.wechat?.stickers);
   validateSearchSettings(config.wechat?.search);
   validateProactiveSettings(config.wechat?.proactive);
@@ -56,6 +59,7 @@ export function prepare(root = projectRoot) {
   if (!fs.existsSync(configFile)) fs.copyFileSync(path.join(root, 'config', 'wechatagent.example.json'), configFile);
   migrateConnections(root);
   const config = validateConfig(read(configFile));
+  const migratedMeme=migrateDshSettings(root,config);if(migratedMeme!==null){validateConfig(config);write(configFile,config);}
   const state = path.join(root, 'state');
   for (const dir of ['logs', 'weflow', 'attachments']) fs.mkdirSync(path.join(state, dir), { recursive: true });
   if (config.runtime.sender === 'wechat-hook') {
@@ -107,13 +111,14 @@ export function prepare(root = projectRoot) {
   if (fs.existsSync(patchFile)) {
     const before = fs.readFileSync(patchFile, 'utf8');
     let after = before.replace(/^(        provider:).*/m, `$1 ${JSON.stringify(config.dsh.provider)}`).replace(/^(        model:).*/m, `$1 ${JSON.stringify(config.dsh.model)}`);
-    const moduleDir=path.dirname(patchFile),sources=['native-context.mjs','web-reader.mjs','web-reader-policy.mjs','web-reader-content.mjs','web-reader-fetch.mjs','skills/web-reader/skill.json','skills/web-reader/SKILL.md','search-budget.mjs','search-policy.mjs','weather-query.mjs','weather-source.mjs','social-tool-policy.mjs','social-tool-restrict.mjs','context-policy.mjs'].map(name=>path.join(moduleDir,name));
+    const moduleDir=path.dirname(patchFile),sources=['native-context.mjs','conversation-policy.mjs','dsh-access.mjs','dsh-bundled.mjs','sticker-pool-review.mjs','dsh-migration.mjs','web-reader.mjs','web-reader-policy.mjs','web-reader-content.mjs','web-reader-fetch.mjs','skills/web-reader/skill.json','skills/web-reader/SKILL.md','model-search.mjs','dsh-search.mjs','search-provider.mjs','skills/search/skill.json','skills/search/SKILL.md','search-budget.mjs','search-policy.mjs','weather-query.mjs','weather-source.mjs','social-tool-policy.mjs','social-tool-restrict.mjs','context-policy.mjs'].map(name=>path.join(moduleDir,name));
     if(sources.every(file=>fs.existsSync(file))){
       const revision=crypto.createHash('sha256').update(Buffer.concat(sources.map(file=>fs.readFileSync(file)))).digest('hex').slice(0,16);
       const entry=pathToFileURL(sources[0]).href+'?wechatagent='+revision;
       after=after.replace(/(    - id: dsh-social-bridge-plugin\r?\n      name:).*/,'$1 '+JSON.stringify(entry));
     }
     after = /^        port:/m.test(after) ? after.replace(/^        port:.*/m, `        port: ${config.ports.dshPlugin}`) : after.replace(/^(        model:.*)$/m, `$1\n        port: ${config.ports.dshPlugin}`);
+    if(migratedMeme&&Object.keys(migratedMeme).length&&!/^        memeSearch:/m.test(after))after=after.replace(/^(        port:.*)$/m,'$1\n        memeSearch: '+JSON.stringify(migratedMeme));
     if (before !== after) fs.writeFileSync(patchFile, after);
   }
   // Original WeFlow owns its encrypted configuration in every provider mode.

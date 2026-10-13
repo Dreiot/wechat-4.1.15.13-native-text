@@ -15,9 +15,12 @@ export class DshPluginClient {
     try{const response=await fetch(this.url+'/health',{headers:{authorization:'Bearer '+this.token},signal:AbortSignal.timeout(2000)});
       const health=await response.json();
       this.searchSupported=response.ok&&health.searchBudget==='per-turn-count-v1'&&health.searchReasoning==='model-default-v1';
-    }catch{this.searchSupported=false;}
+      this.modelSearchSupported=response.ok&&health.ok===true&&health.searchTool==='model-search-v1'&&health.searchRoute==='dsh-native-only-v1';
+    }catch{this.searchSupported=false;this.modelSearchSupported=false;}
     this.searchHealthAt=Date.now();return this.searchSupported;
   }
+
+  async modelSearchReady(){await this.searchReady();return this.modelSearchSupported===true;}
 
   async followup(conversationKey, message, metadata = {}) {
     const response = await fetch(`${this.url}/followup`, {

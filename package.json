@@ -1,6 +1,6 @@
 {
   "name": "wechatagent",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
   "type": "module",
   "description": "Personal WeChat AI friend with NT reader, WeChat-Hook, OneBot v11 and an existing DSH Desktop",

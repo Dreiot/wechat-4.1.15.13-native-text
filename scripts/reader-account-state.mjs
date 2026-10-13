@@ -32,7 +32,7 @@ export function cachedReaderAccount(root, id) {
 }
 
 export function accountChatSettings(config) {
-  return { whitelist: structuredClone(config.wechat.whitelist), personaChats: structuredClone(config.persona.chats ?? {}),
+  return { whitelist: structuredClone(config.wechat.whitelist), personaChats: structuredClone(config.persona.chats ?? {}),chatModes:structuredClone(config.wechat.chatModes??{}),dshChats:structuredClone(config.wechat.dshAccess?.chats??{}),
     featureChats: Object.fromEntries(chatFeatures.map(name => [name, structuredClone(config.wechat[name]?.chats ?? {})])) };
 }
 
@@ -76,6 +76,7 @@ export function applyReaderAccount(root, previousReader, nextReader, config) {
     const chats = incoming?.chats ?? { whitelist: { private: [], groups: [] }, personaChats: {}, featureChats: {} };
     selectedConfig.wechat.whitelist = structuredClone(chats.whitelist);
     selectedConfig.persona.chats = structuredClone(chats.personaChats ?? {});
+    selectedConfig.wechat.chatModes=structuredClone(chats.chatModes??{});selectedConfig.wechat.dshAccess={chats:structuredClone(chats.dshChats??{})};
     for (const feature of chatFeatures) if (selectedConfig.wechat[feature]) selectedConfig.wechat[feature].chats = structuredClone(chats.featureChats?.[feature] ?? {});
     // Image credentials and explicit message filters belong to the selected account.
     for (const field of ['imageAesKey', 'imageXorKey', 'messagePushFilterList']) {

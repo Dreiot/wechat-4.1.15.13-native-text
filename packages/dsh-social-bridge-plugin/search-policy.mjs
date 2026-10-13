@@ -1,8 +1,8 @@
 import { isWebReadRequest } from './web-reader-policy.mjs';
 import {weatherIntent,weatherRequest} from './weather-query.mjs';
 export const SEARCH_DEFAULTS=Object.freeze({enabled:false,cache:true,maxResults:3,maxSnippetChars:1200,
-  maxSearchesPerTurn:1,timeoutMs:8000,cacheTtlSeconds:900});
-const ranges={maxResults:[1,3],maxSnippetChars:[256,3000],maxSearchesPerTurn:[1,3],timeoutMs:[1000,12000],cacheTtlSeconds:[60,3600]};
+  maxSearchesPerTurn:1,timeoutMs:20000,cacheTtlSeconds:900});
+const ranges={maxResults:[1,3],maxSnippetChars:[256,3000],maxSearchesPerTurn:[1,3],timeoutMs:[1000,60000],cacheTtlSeconds:[60,3600]};
 export function validateSearchSettings(value){
   if(value===undefined)return;
   if(!value||typeof value!=='object'||Array.isArray(value))throw Error('Invalid search settings');

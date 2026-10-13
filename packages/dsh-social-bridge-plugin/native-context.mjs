@@ -5,10 +5,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { createUserMessage } from '@deepseek-ai/dsh-llm';
+import { createUserMessage, BlockAssembler } from '@deepseek-ai/dsh-llm';
+import {createStickerPoolReviewer} from './sticker-pool-review.mjs';
 import { imageBlocks, offloadCompletedSessionImages } from './image-input.mjs';
 import { BEHAVIOR_POLICY, localPersona, assertLocalPersona } from './local-policy.mjs';
 import { bindWebReader, createWebReaderTurn, webReaderInstructions, builtinWebReader } from './web-reader.mjs';
+import {bindModelSearch,createModelSearchTurn,modelSearchInstructions,builtinModelSearch,refreshSearchToolBaseline} from './model-search.mjs';
+import {bindDshAccess,dshCatalog,retireDshSkillHistory,readDshAccess} from './dsh-access.mjs';
+import {conversationAccess} from './conversation-policy.mjs';
 const runtimeQuery=new URL(import.meta.url).search;
 const {admittedSearch,consumeSearchRequest,retireSearchContext}=await import(new URL('./search-budget.mjs'+runtimeQuery,import.meta.url));
 const {SOCIAL_TOOL_ISOLATION,retireSocialToolMetadata}=await import(new URL('./social-tool-policy.mjs'+runtimeQuery,import.meta.url));
@@ -99,14 +103,14 @@ export function apply(ctx, config={}) {
   if (!token || !provider || !model || !Number.isSafeInteger(port) || port<1 || port>65535 || !['127.0.0.1','localhost','::1'].includes(host)) throw new Error('Invalid DSH bridge configuration');
   const statePath = sidScope ? path.join(root,'state/accounts',sidScope,'dsh-sessions.json') : path.resolve(config.statePath ?? path.join(process.env.DSH_HOME ?? path.join(os.homedir(),'.dsh'),'dsh-social-bridge/sessions.json'));
   const log = ctx.logger(name), handles = new Map(), startup = new Map(), pending = new Map(), turns = new Map(), operations = new Map(), staged = new Set();
+  const reviewStickerPool=createStickerPoolReviewer({ctx,root,provider,model,createUserMessage,BlockAssembler,isAllowed:accountReady,isBusy:()=>pending.size>0});
   const extensionBindings = new Map();
   const webReaderBindings = new Map();
+  const modelSearchBindings = new Map();
+  const dshBindings=new Map();
   let extensionPromise;
-  async function extensions() {
-    if (!fs.existsSync(path.join(root,'extensions'))) return null;
-    extensionPromise ??= import(pathToFileURL(path.join(root,'packages/extension-runtime/index.mjs')).href).then(sdk=>({sdk,runtime:new sdk.ExtensionRuntime({root,log:line=>log.info(line)})}));
-    return extensionPromise;
-  }
+  async function extensions() {return null;} // Skills and plugin tools are supplied by DSH.
+
   let mappings = {}, profiles = {};
   if (fs.existsSync(statePath)) {
     const saved = JSON.parse(fs.readFileSync(statePath,'utf8'));
@@ -118,6 +122,7 @@ export function apply(ctx, config={}) {
     const generation=profiles[key]?.generation ?? 0;
     if(!KEY.test(key) || !Number.isSafeInteger(generation) || generation<0 || generation>1000000 || sid!==accountSidFor(key,generation))throw new Error('Invalid social session identity');
   }
+  let bundledDispose; if(ctx.get?.('tools'))import('./dsh-bundled.mjs').then(module=>{bundledDispose=module.registerDshBundled(ctx,root,{settings:config.memeSearch??{},keyFor,isAllowed:accountReady});}).catch(error=>log.warn('DSH bundled tool load failed:',error.message));
   const keyFor = sid => Object.keys(mappings).find(key => mappings[key]===sid);
   const persist = () => {
     fs.mkdirSync(path.dirname(statePath),{recursive:true});
@@ -242,6 +247,13 @@ export function apply(ctx, config={}) {
       const revision=extension.runtime.bindingRevision(key),previous=extensionBindings.get(sid);
       if(!previous || previous.revision!==revision){previous?.();const dispose=extension.sdk.bindAgentTools(agent.ctx,extension.runtime,key,()=>pending.get(sid)?.extensionTurn);dispose.revision=revision;extensionBindings.set(sid,dispose);}
     }
+    if(!modelSearchBindings.has(sid))modelSearchBindings.set(sid,bindModelSearch(agent.ctx,root,key,()=>pending.get(sid)?.modelSearchTurn,{log:line=>log.info(line),isAllowed:accountReady,nativeSearch:(request,signal)=>{
+      const web=ctx.get?.('web');
+      if(typeof web?.search!=='function')throw Object.assign(Error('Native search unavailable'),{code:'WEB_PROVIDER_UNAVAILABLE'});
+      return ctx.agents.withInitiator(agent,()=>web.search(request,signal));
+    }}));
+    if(!dshBindings.has(sid))dshBindings.set(sid,bindDshAccess(agent.ctx,ctx,agent,root,key,()=>pending.get(sid)?.dshAccessTurn,{isAllowed:accountReady}));
+    retireDshSkillHistory(session,createUserMessage,readDshAccess(root,key).skills);
     retireSocialToolMetadata(session,createUserMessage);
     retireExtensionContext(session);retireBuiltinContext(session);
     const previous=profiles[key] ?? {};
@@ -270,8 +282,12 @@ export function apply(ctx, config={}) {
     const state=contextState(agent.session,profile.digest);
     const sid=String(agent.session.id),search=pending.get(sid)?.search;
     const messages=[...decision.messages];
+    refreshSearchToolBaseline(agent.ctx,agent.session,pending.get(sid)?.modelSearchTurn);
     const webInstructions=webReaderInstructions(root,key,pending.get(sid)?.webReaderTurn ?? {urls:new Set()});
     if(webInstructions)messages.unshift(createUserMessage({content:[{type:'text',text:webInstructions}],source:{kind:'wechat-social-bridge',form:'relay',socialBuiltinContext:true}}));
+    const searchInstructions=modelSearchInstructions(root,key,pending.get(sid)?.modelSearchTurn);
+    if(searchInstructions)messages.unshift(createUserMessage({content:[{type:'text',text:searchInstructions}],source:{kind:'wechat-social-bridge',form:'relay',socialExtensionContext:true}}));
+    const dshInstructions=await dshBindings.get(sid)?.instructions();if(dshInstructions)messages.unshift(createUserMessage({content:[{type:'text',text:dshInstructions}],source:{kind:'wechat-social-bridge',form:'relay',socialExtensionContext:true}}));
     const extensionContext=pending.get(sid)?.extensionContext;
     if(extensionContext)messages.unshift(createUserMessage({content:[{type:'text',text:extensionContext}],source:{kind:'wechat-social-bridge',form:'relay',socialExtensionContext:true}}));
     if(search && !sessionHasSearch(agent.session,search.ticket))messages.unshift(createUserMessage({content:[{type:'text',text:search.text}],
@@ -299,9 +315,9 @@ export function apply(ctx, config={}) {
     if(search){
       // Search evidence is admitted once. Each actual webpage tool invocation
       // may need one continuation; retries without a new invocation stay denied.
-      const reads=pending.get(sid)?.webReaderTurn?.calls ?? 0;
+      const reads=(pending.get(sid)?.webReaderTurn?.calls ?? 0)+(pending.get(sid)?.modelSearchTurn?.toolCalls ?? 0)+(pending.get(sid)?.extensionTurn?.toolCalls ?? 0);
       if(search.requests++===0)consumeSearchRequest(root,key,search);
-      else if(reads<1 || reads>3 || reads<=(search.lastWebReads ?? 0))throw new Error('SEARCH_MODEL_REQUEST_LIMIT');
+      else if(reads<1 || reads>12 || reads<=(search.lastWebReads ?? 0))throw new Error('SEARCH_MODEL_REQUEST_LIMIT');
       search.lastWebReads=reads;
       return result;
     }
@@ -321,8 +337,10 @@ export function apply(ctx, config={}) {
     if(event.type==='turn/start' && !turns.has(sid))turns.set(sid,{id:event.data.turn,text:''});
     if(event.type==='assistant/message'){
       const turn=turns.get(sid);
+      if((pending.get(sid)?.dshAccessTurn?.toolCalls??0)+(pending.get(sid)?.dshAccessTurn?.skillCalls??0)>0&&turn?.id===event.data.turn)turn.text='';
       if(pending.get(sid)?.extensionTurn?.toolCalls>0 && turn?.id===event.data.turn)turn.text='';
       if(pending.get(sid)?.webReaderTurn?.calls>0 && turn?.id===event.data.turn)turn.text='';
+      if(pending.get(sid)?.modelSearchTurn?.toolCalls>0 && turn?.id===event.data.turn)turn.text='';
       if(turn?.id===event.data.turn)for(const block of event.data.message?.content ?? [])if(block.type==='text')turn.text+=String(block.text ?? '');
     }
     if(event.type!=='turn/end')return;
@@ -344,13 +362,20 @@ export function apply(ctx, config={}) {
     const reply=(code,body)=>{if(!res.destroyed){res.writeHead(code,{'content-type':'application/json; charset=utf-8'});res.end(JSON.stringify(body));}};
     const supplied=Buffer.from(String(req.headers.authorization ?? '').replace(/^Bearer /i,'')), expected=Buffer.from(token);
     if(supplied.length!==expected.length || !crypto.timingSafeEqual(supplied,expected))return reply(401,{error:'unauthorized'});
-    if(req.method==='GET' && req.url==='/health')return reply(200,{ok:accountReady(),accountScope:loadedAccount.id,messageSource:'wechat-social-bridge',project:'WeChatAgent',projectRoot:root,extensionApiVersion:1,contextMode:'native-session-v1',contextMaintenance:'idle-threshold-v1',sessionNaming:true,imageInput:'native-attachment-v1',imageOffloadMode:'after-turn-v1',sessionLifecycle:'archive-rotation-v1',turnRecovery:'cancel-on-timeout-v1',builtinSkills:'web-reader-v1',searchBudget:'per-turn-count-v1',searchReasoning:'model-default-v1',toolIsolation:SOCIAL_TOOL_ISOLATION,pendingTurns:pending.size,behaviorPolicy:BEHAVIOR_POLICY,coherencePolicy:COHERENCE_POLICY});
+    if(req.method==='GET' && req.url==='/health')return reply(200,{ok:accountReady(),accountScope:loadedAccount.id,messageSource:'wechat-social-bridge',project:'WeChatAgent',projectRoot:root,extensionApiVersion:1,contextMode:'native-session-v1',contextMaintenance:'idle-threshold-v1',sessionNaming:true,imageInput:'native-attachment-v1',imageOffloadMode:'after-turn-v1',sessionLifecycle:'archive-rotation-v1',turnRecovery:'cancel-on-timeout-v1',builtinSkills:'web-reader-v1',searchTool:'model-search-v1',searchRoute:'dsh-native-only-v1',dshAccess:'per-chat-v1',stickerPoolReview:'ds-select-v1',searchBudget:'per-turn-count-v1',searchReasoning:'model-default-v1',toolIsolation:SOCIAL_TOOL_ISOLATION,pendingTurns:pending.size,behaviorPolicy:BEHAVIOR_POLICY,coherencePolicy:COHERENCE_POLICY});
     if(!accountReady())return reply(409,{error:'account_changed',detail:'ACCOUNT_SWITCH_REQUIRES_DSH_RESTART'});
+    if(req.method==='POST'&&req.url==='/sticker-pool-review') {
+      try {
+        let raw='';for await(const chunk of req){raw+=chunk.toString('utf8');if(raw.length>1024)throw Error('request_too_large');}
+        return reply(200,await reviewStickerPool(JSON.parse(raw).ticket));
+      }catch(error){return reply(503,{error:'sticker_review_unavailable',detail:String(error.message).slice(0,160)});}
+    }
     if(req.method==='GET' && req.url==='/extensions') {
       try { const extension=await extensions(); if(extension && pending.size===0)await extension.runtime.sync({force:true});return reply(200,{apiVersion:1,extensions:extension?.runtime.list() ?? [],busy:pending.size>0}); }
       catch(error){return reply(503,{error:'extensions_unavailable'});}
     }
-    if(req.method==='GET' && req.url==='/skills')return reply(200,{skills:[builtinWebReader()]});
+    if(req.method==='GET'&&req.url==='/dsh-catalog'){try{return reply(200,await dshCatalog(ctx,{cwd:config.cwd??process.cwd(),signal:AbortSignal.timeout(4000)}));}catch{return reply(503,{error:'dsh_catalog_unavailable'});}}
+    if(req.method==='GET' && req.url==='/skills')return reply(200,{skills:[builtinWebReader(),builtinModelSearch()]});
     if(req.method==='GET' && req.url==='/sessions')return reply(200,{sessions:Object.entries(mappings).map(([key,sid])=>({conversationKey:key,sessionId:sid,title:profiles[key]?.title ?? sessionTitle(key),initializations:profiles[key]?.initializations ?? 0,compactions:profiles[key]?.compactions ?? 0,generation:profiles[key]?.generation ?? 0,previousSessionCount:profiles[key]?.previousSessions?.length ?? 0,...contextStatus(key,sid),contextAuto:profiles[key]?.contextAuto ? {status:profiles[key].contextAuto.status,finishedAt:profiles[key].contextAuto.finishedAt,retryAt:profiles[key].contextAuto.retryAt} : null}))});
     if(req.method!=='POST' || !['/followup','/configure','/compact','/context-maintenance'].includes(req.url))return reply(404,{error:'not_found'});
     try{
@@ -372,11 +397,13 @@ export function apply(ctx, config={}) {
         const batchId=typeof body.batchId==='string' && /^[a-f0-9]{64}$/.test(body.batchId)?body.batchId:null;
         const cached=batchId && profiles[key].cache?.[batchId];
         if(cached?.digest===profiles[key].digest)return {...cached.output,cached:true};
-        const webReaderTurn=createWebReaderTurn(message,body.webReaderUrls);
+        const networkOptOut=body.searchOptOut===true||/^(?:不要|不用|别)(?:联网|搜索|查)/.test(message.trim());
+        const webReaderTurn=createWebReaderTurn(message,networkOptOut?[]:body.webReaderUrls);
         const search=admittedSearch(root,key,body);
+        const modelSearchTurn=createModelSearchTurn({webTurn:webReaderTurn,optOut:networkOptOut,privateNames:body.searchPrivateNames,prefetchedSearches:search?.searches??0});
         const images=await imageBlocks(ctx,root,key,body.images ?? [],provider,model);
         const extension=await extensions();
-        const extensionTurn={conversationKey:key,conversationName:profiles[key].conversationName,sessionId:sid,replies:[],toolCalls:0};
+        const extensionTurn={conversationKey:key,conversationName:profiles[key].conversationName,sessionId:sid,replies:[],toolCalls:0,networkOptOut};
         const additions=extension?.runtime.instructions(key,message) ?? '';
         const hookResults=extension ? await extension.runtime.hooks('before-context',{message},extensionTurn) : [];
         const extraContext=[additions,...hookResults.map(item=>typeof item?.context==='string'?item.context.slice(0,4000):'')].filter(Boolean).join('\n').slice(0,10000);
@@ -391,7 +418,7 @@ export function apply(ctx, config={}) {
             try{agent.cancel({kind:'user'});}catch(error){log.warn('timed-out turn cancellation failed:',error.message);}
             reject(new Error('agent_timeout'));
           },Number(config.turnTimeoutMs ?? 120000))};
-          item.webReaderTurn=webReaderTurn;item.search=search;item.extensionTurn=extensionTurn;item.extensionContext=extensionNotice;pending.set(sid,item);
+          item.dshAccessTurn={controller:webReaderTurn.controller,networkOptOut,skillCalls:0,toolCalls:0};item.webReaderTurn=webReaderTurn;item.modelSearchTurn=modelSearchTurn;item.search=search;item.extensionTurn=extensionTurn;item.extensionContext=extensionNotice;pending.set(sid,item);
           try{agent.followup(createUserMessage({content:[{type:'text',text:message},...images],source:{kind:'wechat-social-bridge',form:'relay',...(images.length?{socialImageIds:body.images.map(image=>image.id)}:{})}}));}
           catch(error){webReaderTurn.controller.abort();clearTimeout(item.timer);pending.delete(sid);turns.delete(sid);staged.delete(sid);reject(error);}
         });
@@ -416,11 +443,12 @@ export function apply(ctx, config={}) {
   // Warm discovery at plugin startup, before the first ordinary chat needs it.
   extensions().then(extension=>extension?.runtime.sync()).catch(error=>log.warn('extension preload failed:',error.message));
   server.listen(port,host,()=>log.info(`Native-session WeChat plugin listening on ${host}:${port}`));
-  ctx.effect(()=>async()=>{
+  ctx.effect(()=>async()=>{bundledDispose?.();for(const binding of dshBindings.values())binding.dispose();
     for(const item of pending.values()){item.webReaderTurn?.controller.abort();clearTimeout(item.timer);item.reject(new Error('plugin_stopped'));}pending.clear();
     server.closeAllConnections();await new Promise(resolve=>server.close(resolve));
     for(const dispose of extensionBindings.values())dispose();
     for(const dispose of webReaderBindings.values())dispose();
+    for(const dispose of modelSearchBindings.values())dispose();
     if(extensionPromise)await (await extensionPromise).runtime.dispose();
     await Promise.allSettled([...handles.values()].map(handle=>handle.dispose()));
   });

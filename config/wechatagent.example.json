@@ -41,7 +41,9 @@
     "stickers": {
       "enabled": true,
       "labelCache": true,
-      "chats": {}
+      "chats": {},
+      "collectEnabled": true,
+      "shareEnabled": true
     },
     "search": {
       "enabled": false,
@@ -49,7 +51,7 @@
       "maxResults": 3,
       "maxSnippetChars": 1200,
       "maxSearchesPerTurn": 1,
-      "timeoutMs": 8000,
+      "timeoutMs": 20000,
       "cacheTtlSeconds": 900,
       "chats": {}
     },
@@ -72,6 +74,10 @@
     },
     "webReader": {
       "enabled": true
+    },
+    "chatModes": {},
+    "dshAccess": {
+      "chats": {}
     }
   },
   "persona": {

@@ -74,8 +74,8 @@ export class WechatOneBotAdapter extends BaseAdapter {
     this.recentOutgoing.set(this.#fingerprint(kind, id, content), Date.now() + this.antiLoopTtlMs);
     this.stats.sends++; return { accepted: true, response: result, delivered: 'database-confirmed' };
   }
-  async stickerChoices({kind,target}){
-    const result=await this.server.action('get_sticker_list',{kind,target:String(target)});
+  async stickerChoices({kind,target,query}){
+    const result=await this.server.action('get_sticker_list',{kind,target:String(target),...(typeof query==='string'&&query.trim()?{query:query.slice(0,500)}:{})});
     return result.data?.enabled?(result.data.stickers??[]):[];
   }
   async sendSticker({kind,target,id,deliveryId}){

@@ -128,7 +128,7 @@ export async function resolveSafeHost(hostname) {
     throw new Error(`域名解析失败：${error?.message ?? error}`);
   }
   if (!addresses.length) throw new Error('域名没有解析结果');
-  if (addresses.every(({address}) => /^198\.(?:18|19)\./.test(address))) throw Error('代理 DNS 返回 Fake-IP，尚未连接目标网页。请将代理 DNS 模式设为 redir-host，或将目标域名加入 fake-ip-filter，再重启代理和助手服务');
+  if (addresses.every(({address}) => /^198\.(?:18|19)\./.test(address))) throw Error('本机代理 DNS 返回 Fake-IP，当前页面未取得可连接的公网地址，正文读取已停止；此状态不代表 DSH 服务端搜索不可用');
   for (const { address } of addresses) {
     if (isPrivateIp(address)) {
       throw new Error('域名解析到内网/本机地址，已阻止');

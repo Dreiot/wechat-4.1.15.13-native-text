@@ -153,7 +153,7 @@ export class ExtensionRuntime {
       reply:text=>{check('reply');const value=clipped(text).trim();if(!value)throw error('回复不能为空。');if(turn.replies.length>=3)throw error('本轮回复申请过多。');turn.replies.push({id:record.id,text:value});return {content:'回复已申请，将由本轮发送流程处理。'};},
       history:Object.freeze({recent:({limit=20}={})=>{check('history_read');if(!Number.isInteger(limit)||limit<1||limit>100)throw error('历史数量必须为 1–100。');const file=path.join(this.root,'state/social-messages.json');return structuredClone(fs.existsSync(file)?(readJson(file).chats?.[key]??[]).slice(-limit).map(row=>({id:row.id,text:clipped(row.text),sender:row.sender_name ?? row.sender_id,timestamp:row.timestamp,outgoing:!!row.outgoing})):[]);}}),
       storage:Object.freeze({get:name=>{check('storage');return structuredClone(fs.existsSync(storageFile)?readJson(storageFile)[storageKey(name)]:undefined);},set:(name,value)=>{check('storage');const data=fs.existsSync(storageFile)?readJson(storageFile):{};data[storageKey(name)]=structuredClone(value);if(Buffer.byteLength(JSON.stringify(data))>262144)throw error('扩展存储超过 256 KiB。');atomicJson(storageFile,data);},delete:name=>{check('storage');const data=fs.existsSync(storageFile)?readJson(storageFile):{};delete data[storageKey(name)];atomicJson(storageFile,data);}}),
-      fetch:(url,options)=>{check('web_fetch');return this.fetchFor(record,url,options,key,signal);},
+      fetch:(url,options)=>{check('web_fetch');if(turn.networkOptOut)throw error('EXTENSION_NETWORK_DISABLED_FOR_TURN');return this.fetchFor(record,url,options,key,signal);},
       hasCapability:name=>this.hasCapability(name,key),
     });
   }
@@ -214,7 +214,7 @@ export class ExtensionRuntime {
 }
 export function bindAgentTools(agentCtx,runtime,key,turnFor) {
   const disposers=[];
-  const policy={names:()=>new Set(runtime.toolDefinitions(key).map(tool=>tool.name)),check:name=>runtime.toolDefinitions(key).some(tool=>tool.name===name) && !!turnFor()};
+  const policy={names:()=>new Set(runtime.toolDefinitions(key).map(tool=>tool.name)),check:name=>runtime.toolDefinitions(key).some(tool=>tool.name===name) && !!turnFor(),definitions:()=>runtime.toolDefinitions(key)};
   Object.defineProperty(agentCtx,TOOL_POLICY,{value:policy,configurable:true});
   for(const tool of runtime.toolDefinitions(key)) {
     // DSH 0.2 registry-ready definition. Validation and deadlines are enforced by this runtime.

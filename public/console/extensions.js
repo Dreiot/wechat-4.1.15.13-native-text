@@ -1,5 +1,7 @@
-export function createExtensionUI({api,modal,closeModal,confirmAction,escapeHtml:esc,icon,state,renderPage,toast,onProjectSave}) {
+import {createDshAccessUI} from './dsh-access.js';
+export function createExtensionUI({api,modal,closeModal,confirmAction,escapeHtml:esc,icon,state,renderPage,toast,onDshSave,onProjectSave}) {
   const permissionLabels={web_fetch:'访问公开网络',history_read:'读取当前聊天历史',storage:'保存当前聊天的数据',reply:'申请向当前聊天回复'};
+  const dshUI=createDshAccessUI({api,modal,closeModal,escapeHtml:esc,icon,state,renderPage,toast,onSave:onDshSave});
   let catalog,opening=false;
   const names=key=>state.names.get(key) ?? key;
   const summary=item=>item.featureState?`功能默认值：${item.featureState.globalEnabled?'开启':'关闭'} · 当前开启 ${item.featureState.effectiveCount}/${item.featureState.totalCount} 个允许的聊天`:
@@ -7,8 +9,9 @@ export function createExtensionUI({api,modal,closeModal,confirmAction,escapeHtml
   const status=item=>`<span class="status-tag ${esc(item.statusTone??'')}" data-extension-status>${esc(item.statusLabel ?? (item.enabled?'已开启':'已关闭'))}</span>`;
   async function page() {
     catalog=await api('/api/extensions');
+    const dshPage=await dshUI.page();
     const items=catalog.extensions,enabled=items.filter(item=>['已开启','部分开启'].includes(item.statusLabel)).length;
-    return `<section class="card"><div class="card-header"><div><h2>技能与插件</h2><p class="card-description">点击卡片查看开关和适用聊天。当前开启 ${enabled} 项，共 ${items.length} 项。</p></div>${catalog.canImport===false?'':`<button class="button primary" id="import-extension">${icon('plus')}导入扩展</button>`}</div><p class="card-description">${catalog.runtimeConnected?'DSH 已连接。设置保存后在后续聊天中应用。':'DSH 暂未连接；已保存的开关仍会显示，运行状态待连接后确认。'}</p><a class="text-link" href="https://github.com/sourcepro5/WeChatAgent" target="_blank" rel="noopener noreferrer">项目说明 ${icon('arrow')}</a></section>`+
+    return dshPage+`<section class="card"><div class="card-header"><div><h2>微信功能设置</h2><p class="card-description">点击卡片查看开关和适用聊天。当前开启 ${enabled} 项，共 ${items.length} 项。</p></div>${catalog.canImport===false?'':`<button class="button primary" id="import-extension">${icon('plus')}导入扩展</button>`}</div><p class="card-description">${catalog.runtimeConnected?'DSH 已连接。设置保存后在后续聊天中应用。':'DSH 暂未连接；已保存的开关仍会显示，运行状态待连接后确认。'}</p><a class="text-link" href="https://github.com/sourcepro5/WeChatAgent" target="_blank" rel="noopener noreferrer">项目说明 ${icon('arrow')}</a></section>`+
       (items.length?items.map(item=>`<section class="card extension-card" data-extension-card="${esc(item.id)}"><div class="card-header"><div><h2><button class="extension-title" data-extension="${esc(item.id)}" aria-label="查看${esc(item.name)}设置">${esc(item.name)}</button></h2><p class="card-description">${esc(item.description)}</p></div>${status(item)}</div><p class="extension-summary">${esc(summary(item))}</p><p class="card-description">${esc(item.reason??'')} · ${item.builtin?'内置'+(item.kind==='plugins'?'插件':'技能'):item.format==='markdown'?'说明型技能':'工具型扩展'} · ${esc(item.version??'清单无效')}</p><div class="button-row"><button class="button" data-extension="${esc(item.id)}">查看开关与聊天范围</button>${item.builtin||item.bundled?'':`<button class="button" data-uninstall-extension="${esc(item.id)}">卸载</button>`}</div></section>`).join(''):`<section class="card"><div class="empty-state">${icon('plug')}<h3>还没有扩展</h3><p>导入包含 SKILL.md、skill.json 或 plugin.json 的本地目录。</p></div></section>`);
   }
   const footer=()=>'<p class="extension-error" id="extension-error" role="alert" hidden></p><div class="modal-actions"><button class="button" type="button" data-close>取消</button><button class="button primary" type="submit">保存扩展设置</button></div>';

@@ -14,6 +14,8 @@ import { runConsoleCommand, taskFailureMessage, windowsPowerShellEnvironment, wi
 import { personaError } from '../public/console/persona-files.mjs';
 import {applyChatSettings} from '../public/console/conversation-settings.mjs';
 import { runReaderSetup, readerSetupMessage } from './reader-setup.mjs';
+import { dshConfigurationMatches } from './dsh-configuration.mjs';
+import { createProcessRecovery } from './process-recovery.mjs';
 import { readerAccountId, cachedReaderAccount, applyReaderAccount } from './reader-account-state.mjs';
 
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
@@ -76,7 +78,7 @@ export function validateConsoleConfig(config, root) {
 }
 
 import {allowedConversation,validateConversationSettings} from '../packages/dsh-social-bridge-plugin/conversation-policy.mjs';
-export function createConsole({ root = projectRoot, port = 3210, runner, readerSetup = runReaderSetup, fetchImpl = fetch, nodeExecutable = process.execPath, filePicker, onQuit } = {}) {
+export function createConsole({ root = projectRoot, port = 3210, runner, readerSetup = runReaderSetup, fetchImpl = fetch, nodeExecutable = process.execPath, filePicker, onQuit, processProbe, processStop } = {}) {
   const updates=createUpdateChecker({root,fetchImpl});
   const publicDir = path.join(projectRoot, 'public', 'console');
   const configFile = path.join(root, 'config', 'wechatagent.json');
@@ -86,6 +88,8 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
   const readerVerified = () => optionalJson(preferenceFile).readerVerifiedRevision === readerRevision();
   const csrf = crypto.randomBytes(32).toString('hex');
   const jobs = new Map(); let activeJob = null; let latestJob = null; let protectingCredential = false;
+  let processRecoveryBusy=false;
+  const processRecovery=createProcessRecovery({root,probe:processProbe,stop:processStop});
   let statusPromise; let statusTime = 0;
   const snapshot = () => {
     const raw = fs.readFileSync(fs.existsSync(configFile) ? configFile : path.join(root, 'config', 'wechatagent.example.json'), 'utf8');
@@ -112,7 +116,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     atomic(preferenceFile, { ...previous, pendingApply: true, dshRestartRequired: previous.dshRestartRequired || dsh });
     statusTime = 0;
   };
-  const assertIdle = () => { if (activeJob || protectingCredential) throw fault('有操作正在进行，请等它完成后再保存或执行其他操作。', 409); };
+  const assertIdle = () => { if (activeJob || protectingCredential || processRecoveryBusy) throw fault('有操作正在进行，请等它完成后再保存或执行其他操作。', 409); };
   async function remote(url, token, timeout = 2200) {
     const response = await fetchImpl(url, { headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: AbortSignal.timeout(timeout) });
     if (!response.ok) throw fault('连接服务暂不可用。请检查服务是否启动。', 503);
@@ -156,7 +160,9 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       ]);
       const value = index => results[index].status === 'fulfilled' ? results[index].value : null;
       const readerState = value(0), adapter = value(2), health = value(3);
-      const dshReady = health?.ok === true && health.project === 'WeChatAgent' && path.resolve(health.projectRoot ?? '') === path.resolve(root) && health.contextMode === 'native-session-v1' && health.behaviorPolicy === 'local-config-only-v1' && health.imageInput === 'native-attachment-v1';
+      const matchesDsh=dshConfigurationMatches(root,snapshot().config,health);
+      if(optionalJson(preferenceFile).dshRestartRequired && matchesDsh)atomic(preferenceFile,{...optionalJson(preferenceFile),dshRestartRequired:false});
+      const dshReady = health?.ok === true && health.project === 'WeChatAgent' && path.resolve(health.projectRoot ?? '') === path.resolve(root) && health.contextMode === 'native-session-v1' && health.behaviorPolicy === 'local-config-only-v1' && health.imageInput === 'native-attachment-v1' && (!optionalJson(preferenceFile).dshRestartRequired || matchesDsh);
       const readerReady = !!readerState && !!value(1) && !readerState.lastError;
       const bridgeReady = !!value(4) && adapter?.ob_connected === true;
       const hookReady = adapter?.hook_connected === true && adapter?.hook_account_verified === true && adapter?.version === config.hook.expectedVersion;
@@ -258,7 +264,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       job.dshRestartRequired = applied.needsDshRestart;
       output(applied.changed ? '已切换并保存账号。聊天范围按账号保存；请完整重开 DSH，再启动助手服务。\n' : applied.needsDshRestart ? '微信数据库已验证并保存。如果 DSH 已打开，请完整重开 DSH，再启动助手服务。\n' : '微信数据库已验证并保存。可以继续启动服务。\n');
       return 0;
-    }).then(code => {
+    }).then(async code => {
       job.exitCode = code; job.state = code === 0 ? 'succeeded' : 'failed';
       if (code !== 0 && ['start', 'restart'].includes(body.action) && /reader exited/.test(job.output)) {
         const file = path.join(root, 'state', 'logs', 'reader.stderr.log');
@@ -269,7 +275,12 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         atomic(preferenceFile, { ...optionalJson(preferenceFile), readerVerifiedRevision: checkRevision }); job.readerConfigured = true;
       }
       if (code === 0 && ['start', 'restart'].includes(body.action)) {
-        atomic(preferenceFile, { ...optionalJson(preferenceFile), pendingApply: false });
+        if(initialConfigRevision!==snapshot().revision)throw fault('设置在启动期间发生变化，请重新应用。',409);
+        if(optionalJson(preferenceFile).dshRestartRequired){
+          const health=await remote('http://127.0.0.1:'+snapshot().config.ports.dshPlugin+'/health',fs.readFileSync(path.join(root,'state/social-dsh-token.txt'),'utf8').trim());
+          if(!dshConfigurationMatches(root,snapshot().config,health))throw fault('DSH 仍未加载当前模型或插件配置。请准备配置，从托盘完整退出并重开 DSH，然后重试。',409);
+        }
+        atomic(preferenceFile, { ...optionalJson(preferenceFile), pendingApply: false, dshRestartRequired:false });
       }
     }).catch(error => { job.state = 'failed'; job.exitCode = 1; job.message = error.status ? error.message : connectRequest ? readerSetupMessage(error.message) : taskFailureMessage(job.output, 1); output(job.message); }).finally(() => {
       job.finishedAt = Date.now(); activeJob = null; statusTime = 0;
@@ -308,6 +319,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         assets['/external-links.js']=['external-links.js','text/javascript; charset=utf-8'];
         assets['/updates.js']=['updates.js','text/javascript; charset=utf-8'];
         assets['/conversation-settings.mjs']=['conversation-settings.mjs','text/javascript; charset=utf-8'];
+        assets['/process-recovery.js']=['process-recovery.js','text/javascript; charset=utf-8'];assets['/process-recovery.css']=['process-recovery.css','text/css; charset=utf-8'];
         assets['/dsh-access.js']=['dsh-access.js','text/javascript; charset=utf-8'];assets['/extensions.js']=['extensions.js','text/javascript; charset=utf-8'];
         if (!assets[route]) return reply(404, { error: '页面不存在。' });
         const [file, type] = assets[route]; return reply(200, fs.readFileSync(path.join(publicDir, file)), type);
@@ -322,9 +334,18 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       if (req.method === 'GET' && route === '/api/deployment') {
         const distribution = optionalJson(path.join(root, 'config', 'distribution.json'));
         const readerSettings = optionalJson(path.join(root, 'state', 'weflow', 'WeFlow-config.json'));
-        return reply(200, { installed: !!distribution.installed, version: distribution.version ?? '0.3.4', configured: !!readerSettings.dbPath && !!readerSettings.myWxid && !!readerSettings.decryptKey && readerVerified(), pluginPath: path.join(root, 'packages', 'dsh-social-bridge-plugin') });
+        return reply(200, { installed: !!distribution.installed, version: distribution.version ?? '0.3.5', configured: !!readerSettings.dbPath && !!readerSettings.myWxid && !!readerSettings.decryptKey && readerVerified(), pluginPath: path.join(root, 'packages', 'dsh-social-bridge-plugin') });
       }
       if (req.method === 'GET' && route === '/api/status') return reply(200, await getStatus());
+      if(req.method==='GET' && route==='/api/process-recovery'){
+        assertIdle();const status=await getStatus(),config=snapshot();
+        const healthyPorts=[];
+        if(status.services.find(service=>service.id==='reader')?.ready)healthyPorts.push(config.config.ports.weflow);
+        if(status.services.find(service=>service.id==='bridge')?.ready)healthyPorts.push(config.config.ports.onebot,config.config.ports.adapter,Number(new URL(config.config.hook.baseUrl).port||80));
+        if(status.services.find(service=>service.id==='dsh')?.ready)healthyPorts.push(config.config.ports.dshPlugin);
+        return reply(200,await processRecovery.scan(config.config,config.revision,{healthyPorts,includeMatchingWeChat:/HOOK_COMPONENT_UPDATE_PENDING/.test(jobs.get(latestJob)?.output??'')}));
+      }
+
       if (req.method === 'GET' && route === '/api/roles') {
         const names = fs.existsSync(path.join(root, 'roles')) ? fs.readdirSync(path.join(root, 'roles')).filter(n => n.endsWith('.md') && n !== 'README.md' && roleName(n.slice(0, -3))) : [];
         return reply(200, { roles: names.map(file => { const content = fs.readFileSync(path.join(root, 'roles', file), 'utf8'); return { name: file.slice(0, -3), content, revision: hash(content) }; }) });
@@ -432,9 +453,16 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         return reply(200, { path: filePicker ? await filePicker(body.kind) : await nativeHelper(body.kind) });
       }
       if (route === '/api/dsh-reopened') {
-        await plugin('/health');
+        const health=await plugin('/health');
+        if(!dshConfigurationMatches(root,snapshot().config,health))throw fault('DSH 尚未加载当前模型或插件版本，请准备配置并完整重开 DSH。',409);
         atomic(preferenceFile, { ...optionalJson(preferenceFile), dshRestartRequired: false }); statusTime = 0;
         return reply(200, { ok: true });
+      }
+      if(route==='/api/process-recovery/prepare')return reply(200,await processRecovery.prepare(body.scanId,body.ids,snapshot().revision));
+      if(route==='/api/process-recovery/stop'){
+        processRecoveryBusy=true;
+        try{return reply(200,await processRecovery.stop(body.confirmation,body.confirmed,snapshot().revision));}
+        finally{processRecoveryBusy=false;statusTime=0;}
       }
       if (route === '/api/reader-config') {
         const file = path.join(root, 'state', 'weflow', 'WeFlow-config.json');
@@ -465,7 +493,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     }
   });
   server.requestTimeout = 180000;
-  return { server, isBusy: () => !!activeJob || protectingCredential, close: () => { server.closeAllConnections(); server.close(); }, start: () => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => resolve(server.address())); }) };
+  return { server, isBusy: () => !!activeJob || protectingCredential || processRecoveryBusy, close: () => { server.closeAllConnections(); server.close(); }, start: () => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => resolve(server.address())); }) };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

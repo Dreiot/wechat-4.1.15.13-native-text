@@ -24,6 +24,14 @@ const KEY = /^(qq|wechat):(private|group):.{1,256}$/;
 const sidFor = (key,generation=0,scope='') => 'social-' + crypto.createHash('sha256').update((scope ? scope+'\0' : '')+(generation ? `${key}\0${generation}` : key)).digest('hex').slice(0,32);
 const hash = text => crypto.createHash('sha256').update(text).digest('hex');
 const COHERENCE_POLICY = 'single-persona-v1';
+// A turn can publish commentary and tool requests before its final answer.
+// Only the last assistant message is eligible for delivery; reasoning blocks
+// and text accompanying a tool call are never a chat reply.
+export function assistantReplyText(message) {
+  const blocks = Array.isArray(message?.content) ? message.content : [];
+  if (message?.toolCalls?.length || blocks.some(block => ['tool-call','tool_call','tool_use'].includes(block.type))) return '';
+  return blocks.filter(block => block.type === 'text' && typeof block.text === 'string').map(block => block.text).join('');
+}
 const clean = (text, limit=60) => String(text ?? '').replace(/[\u0000-\u001f\u007f]/g,' ').replace(/\s+/g,' ').trim().slice(0,limit);
 
 export function sessionTitle(key, conversationName, personaName) {
@@ -337,11 +345,7 @@ export function apply(ctx, config={}) {
     if(event.type==='turn/start' && !turns.has(sid))turns.set(sid,{id:event.data.turn,text:''});
     if(event.type==='assistant/message'){
       const turn=turns.get(sid);
-      if((pending.get(sid)?.dshAccessTurn?.toolCalls??0)+(pending.get(sid)?.dshAccessTurn?.skillCalls??0)>0&&turn?.id===event.data.turn)turn.text='';
-      if(pending.get(sid)?.extensionTurn?.toolCalls>0 && turn?.id===event.data.turn)turn.text='';
-      if(pending.get(sid)?.webReaderTurn?.calls>0 && turn?.id===event.data.turn)turn.text='';
-      if(pending.get(sid)?.modelSearchTurn?.toolCalls>0 && turn?.id===event.data.turn)turn.text='';
-      if(turn?.id===event.data.turn)for(const block of event.data.message?.content ?? [])if(block.type==='text')turn.text+=String(block.text ?? '');
+      if(turn?.id===event.data.turn)turn.text=assistantReplyText(event.data.message);
     }
     if(event.type!=='turn/end')return;
     if(turns.get(sid)?.id!==event.data.turn)return;
@@ -352,7 +356,7 @@ export function apply(ctx, config={}) {
     const reason=event.data.reason?.kind, failure=event.data.reason?.error;
     const output=reason==='completed'?{text:turn?.text ?? '',sessionId:sid}:{error:'turn_'+(reason ?? 'failed'),sessionId:sid,...(failure?.code?{code:String(failure.code)}:{}),...(failure?.message?{detail:String(failure.message).slice(0,2000)}:{})};
     if(!output.error && item.batchId){
-      const cache=profiles[key].cache ??= {};cache[item.batchId]={digest:profiles[key].digest,output};
+      const cache=profiles[key].cache ??= {};cache[item.batchId]={digest:profiles[key].digest,replyFormat:'final-message-v1',output};
       for(const id of Object.keys(cache).slice(0,-20))delete cache[id];saveQuietly();
     }
     item.resolve(output);
@@ -362,7 +366,7 @@ export function apply(ctx, config={}) {
     const reply=(code,body)=>{if(!res.destroyed){res.writeHead(code,{'content-type':'application/json; charset=utf-8'});res.end(JSON.stringify(body));}};
     const supplied=Buffer.from(String(req.headers.authorization ?? '').replace(/^Bearer /i,'')), expected=Buffer.from(token);
     if(supplied.length!==expected.length || !crypto.timingSafeEqual(supplied,expected))return reply(401,{error:'unauthorized'});
-    if(req.method==='GET' && req.url==='/health')return reply(200,{ok:accountReady(),accountScope:loadedAccount.id,messageSource:'wechat-social-bridge',project:'WeChatAgent',projectRoot:root,extensionApiVersion:1,contextMode:'native-session-v1',contextMaintenance:'idle-threshold-v1',sessionNaming:true,imageInput:'native-attachment-v1',imageOffloadMode:'after-turn-v1',sessionLifecycle:'archive-rotation-v1',turnRecovery:'cancel-on-timeout-v1',builtinSkills:'web-reader-v1',webPriceRead:'zxsj-api-v1',searchTool:'model-search-v1',searchRoute:'dsh-native-only-v1',dshAccess:'per-chat-v1',stickerPoolReview:'ds-select-v1',searchBudget:'per-turn-count-v1',searchReasoning:'model-default-v1',toolIsolation:SOCIAL_TOOL_ISOLATION,pendingTurns:pending.size,behaviorPolicy:BEHAVIOR_POLICY,coherencePolicy:COHERENCE_POLICY});
+    if(req.method==='GET' && req.url==='/health')return reply(200,{ok:accountReady(),accountScope:loadedAccount.id,messageSource:'wechat-social-bridge',project:'WeChatAgent',projectRoot:root,extensionApiVersion:1,provider,model,pluginRevision:new URL(import.meta.url).searchParams.get('wechatagent')??'',contextMode:'native-session-v1',contextMaintenance:'idle-threshold-v1',sessionNaming:true,imageInput:'native-attachment-v1',replyText:'final-message-v1',imageRecovery:'per-image-v1',imageOffloadMode:'after-turn-v1',sessionLifecycle:'archive-rotation-v1',turnRecovery:'cancel-on-timeout-v1',builtinSkills:'web-reader-v1',webPriceRead:'zxsj-api-v1',searchTool:'model-search-v1',searchRoute:'dsh-native-only-v1',dshAccess:'per-chat-v1',stickerPoolReview:'ds-select-v1',searchBudget:'per-turn-count-v1',searchReasoning:'model-default-v1',toolIsolation:SOCIAL_TOOL_ISOLATION,pendingTurns:pending.size,behaviorPolicy:BEHAVIOR_POLICY,coherencePolicy:COHERENCE_POLICY});
     if(!accountReady())return reply(409,{error:'account_changed',detail:'ACCOUNT_SWITCH_REQUIRES_DSH_RESTART'});
     if(req.method==='POST'&&req.url==='/sticker-pool-review') {
       try {
@@ -396,12 +400,12 @@ export function apply(ctx, config={}) {
         }
         const batchId=typeof body.batchId==='string' && /^[a-f0-9]{64}$/.test(body.batchId)?body.batchId:null;
         const cached=batchId && profiles[key].cache?.[batchId];
-        if(cached?.digest===profiles[key].digest)return {...cached.output,cached:true};
+        if(cached?.digest===profiles[key].digest&&cached.replyFormat==='final-message-v1')return {...cached.output,cached:true};
         const networkOptOut=body.searchOptOut===true||/^(?:不要|不用|别)(?:联网|搜索|查)/.test(message.trim());
         const webReaderTurn=createWebReaderTurn(message,networkOptOut?[]:body.webReaderUrls);
         const search=admittedSearch(root,key,body);
         const modelSearchTurn=createModelSearchTurn({webTurn:webReaderTurn,optOut:networkOptOut,privateNames:body.searchPrivateNames,prefetchedSearches:search?.searches??0});
-        const images=await imageBlocks(ctx,root,key,body.images ?? [],provider,model);
+        const images=await imageBlocks(ctx,root,key,body.images ?? [],provider,model,{onUnavailable:failure=>log.warn('attachment unavailable:',failure.code)});
         const extension=await extensions();
         const extensionTurn={conversationKey:key,conversationName:profiles[key].conversationName,sessionId:sid,replies:[],toolCalls:0,networkOptOut};
         const additions=extension?.runtime.instructions(key,message) ?? '';

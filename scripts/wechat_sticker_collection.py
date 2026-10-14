@@ -83,7 +83,7 @@ class StickerCollection:
     def remember(self,image_id,descriptor,key):
         if not self.can_collect(key) or not HEX.fullmatch(image_id) or descriptor.get('localType')!=47:return
         with self.lock:
-            state=self.read();state['pending'][image_id]={**state['pending'].get(image_id,{}),'key':key,'descriptor':{name:descriptor[name] for name in ('talker','localId','serverId','createTime','localType','account','sender') if name in descriptor}}
+            state=self.read();state['pending'][image_id]={**state['pending'].get(image_id,{}),'key':key,'descriptor':{name:descriptor[name] for name in ('talker','localId','serverId','createTime','localType','dbLocalType','account','sender') if name in descriptor}}
             while len(state['pending'])>MAX_PENDING:state['pending'].pop(next(iter(state['pending'])))
             self.write(state)
     def pending(self):

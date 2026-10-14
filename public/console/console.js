@@ -5,6 +5,7 @@ import { installExternalLinks } from './external-links.js';
 import { startUpdateUI } from './updates.js';
 import { createExtensionUI } from './extensions.js';
 import {mergeConversationSave} from './conversation-settings.mjs';
+import {openProcessRecovery} from './process-recovery.js';
 const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const icon = name => `<svg aria-hidden="true"><use href="/icons.svg#${name}"></use></svg>`;
@@ -363,6 +364,7 @@ async function renderPage() {
     markup = `<section class="card">${empty('暂时无法读取', error.message, '<button class="button" id="retry-page">重试</button><a class="button" href="#overview">前往概览</a>', 'plug')}</section>`;
   }
   if (sequence !== renderSequence || state.page !== page) return;
+  if(['setup','connections'].includes(page))markup+=`<section class="card process-recovery-card">${header('端口与进程排查','遇到端口占用、其他微信实例或连接失败时，先检查正在运行的进程。','','tool')}<p class="card-description">检查不会停止程序。只有选中具体进程并再次确认后才会停止；随后可重新打开微信或 DSH，再重试配置。</p><button class="button" data-process-recovery>${icon('search')}检查端口与进程</button></section>`;
   $('#page-body').innerHTML = markup; updateDraftUI(); paintStatus(); paintReaderSetup();
   if(page==='behavior')api('/api/sticker-pool').then(pool=>{if(sequence!==renderSequence||!$('#sticker-pool-status'))return;const labels={selected:'DS 已完成评选',waiting_retry:'等待 DS 重试'};$('#sticker-pool-status').textContent='已入池 '+pool.count+'/50 · 待评选 '+(pool.waiting+pool.legacyWaiting)+' · '+(pool.review==='reviewing'?'DS 正在评选':labels[pool.lastReview?.status]??(pool.waiting?'等待 DS 评选':'未满池或没有新候选'));}).catch(()=>{});
   $('#role-content')?.addEventListener('input', event => {
@@ -417,6 +419,7 @@ function paintJob() {
   output.textContent = job.output || '操作已开始，等待结果…'; if (wasAtBottom) output.scrollTop = output.scrollHeight;
   $('#job-state').textContent = running ? '正在执行 · 可收起此窗口' : job.state === 'succeeded' ? '操作成功' : `操作未完成 · 退出码 ${job.exitCode}`;
   $('#job-retry').hidden = job.state !== 'failed';
+  $('#job-recovery').hidden = job.state !== 'failed';
   $('#activity-button').hidden = false;
   document.querySelectorAll('[data-action]').forEach(button => { button.disabled = running; }); updateDraftUI(); paintStatus(); paintReaderSetup();
 }
@@ -557,6 +560,7 @@ document.addEventListener('change', event => {
 });
 document.addEventListener('click', event => {
   const button = event.target.closest('button'); if (!button) return;
+  if(button.matches('[data-process-recovery]')||button.id==='job-recovery')return openProcessRecovery({api,modal,refreshStatus,toast});
   if (button.hasAttribute('data-close')) return closeModal();
   if (button.dataset.action) return runAction(button.dataset.action, button.dataset.key);
   if (button.dataset.browse) return browse(button);
@@ -614,7 +618,7 @@ if (window.desktop) {
   document.body.classList.add('desktop-mode');
   $('.brand span').textContent = '桌面应用';
   $('.breadcrumb > span:first-of-type').textContent = 'WeChatAgent';
-  $('.version').textContent = '0.3.4 · 关闭窗口收起到托盘';
+  $('.version').textContent = '0.3.5 · 关闭窗口收起到托盘';
   $('#quit-console').textContent = '退出应用';
 }
 document.addEventListener('click', event => { if (document.body.classList.contains('nav-open') && !event.target.closest('.sidebar') && !event.target.closest('#menu-button')) {document.body.classList.remove('nav-open');paintNavigation();} });

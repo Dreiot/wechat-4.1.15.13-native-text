@@ -28,8 +28,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from wechat_media import clean_account_wxid
 from wechat_forwarded import FORWARD_TYPE, parse_forwarded_record
 from wechat_quote import QUOTE_TYPE, parse_quote_reply
-from wechat_sticker_send import sticker_send_fields, sticker_receipt_md5, APPMSG_STICKER_TYPE, native_gif_bytes
-from wechat_sticker import emoji_attributes, resolve_sticker_bytes, NoRedirect
+from wechat_sticker_send import sticker_send_fields, sticker_receipt_md5, APPMSG_STICKER_TYPE, native_gif_bytes, stage_sticker_resource
+from wechat_sticker import emoji_attributes, resolve_sticker_bytes, sticker_image_xml, NoRedirect
 from wechat_sticker_labels import StickerLabels, clean_label
 from wechat_sticker_collection import StickerCollection
 
@@ -122,7 +122,7 @@ def push_payload(talker, message, names, own_wxid):
     if message.get('isSend'):
         return None
     kind = message.get('localType')
-    if kind not in (1, 3, 47, PAT_TYPE, 49, FORWARD_TYPE, QUOTE_TYPE):
+    if kind not in (1, 3, 47, APPMSG_STICKER_TYPE, PAT_TYPE, 49, FORWARD_TYPE, QUOTE_TYPE):
         return None
     pat = parse_pat(message.get('fullText', ''), sender, own_wxid) if kind == PAT_TYPE else None
     if kind == PAT_TYPE and not pat:
@@ -133,9 +133,10 @@ def push_payload(talker, message, names, own_wxid):
         return None
     forwarded = parse_forwarded_record(message.get('fullText', '')) if kind in (49, FORWARD_TYPE) else None
     quote_reply = parse_quote_reply(message.get('fullText', '')) if kind in (49, QUOTE_TYPE) else None
-    if kind in (49, FORWARD_TYPE, QUOTE_TYPE) and forwarded is None and quote_reply is None:
+    sticker = kind==47 or kind in (49,APPMSG_STICKER_TYPE) and sticker_image_xml(kind,message.get('fullText','')) is not None
+    if kind in (49, APPMSG_STICKER_TYPE, FORWARD_TYPE, QUOTE_TYPE) and not sticker and forwarded is None and quote_reply is None:
         return None
-    content = '[图片]' if kind == 3 else '[表情包：附件为静态画面或动画采样画面]' if kind == 47 else '[拍一拍] 对方刚刚拍了拍你。' if pat else '[合并转发聊天记录] ' + forwarded['title'] if forwarded else (quote_reply['reply'] or '[引用回复，正文为空]') if quote_reply else message.get('fullText', message.get('content') or message.get('parsedContent', ''))
+    content = '[图片]' if kind == 3 else '[表情包：附件为静态画面或动画采样画面]' if sticker else '[拍一拍] 对方刚刚拍了拍你。' if pat else '[合并转发聊天记录] ' + forwarded['title'] if forwarded else (quote_reply['reply'] or '[引用回复，正文为空]') if quote_reply else message.get('fullText', message.get('content') or message.get('parsedContent', ''))
     if not content.strip():
         return None
     group = '@chatroom' in talker
@@ -146,12 +147,13 @@ def push_payload(talker, message, names, own_wxid):
         'groupName': names.get(talker, talker) if group else '',
         'sourceName': names.get(sender, sender) if group else names.get(talker, talker),
         'senderName': names.get(sender, sender), 'talkerId': sender,
-        'content': content[:4000], 'type': kind, 'timestamp': message.get('createTime', 0),
+        'content': content[:4000], 'type': 47 if sticker else kind, 'timestamp': message.get('createTime', 0),
         **({'pat': pat} if pat else {}),
         **({'forwardedRecord': forwarded} if forwarded else {}),
         **({'quoteReply': quote_reply} if quote_reply else {}),
         **({'image': {'localId': message.get('localId'), 'serverId': message.get('serverId'),
-            'createTime': message.get('createTime'), 'localType': kind}} if kind in (3, 47) else {})}
+            'createTime': message.get('createTime'), 'localType': 47 if sticker else kind,
+            **({'dbLocalType':kind} if sticker and kind!=47 else {})}} if kind==3 or sticker else {})}
 
 
 class Reader:
@@ -309,11 +311,15 @@ class Reader:
                     continue
                 row = connection.execute('SELECT local_type,message_content FROM "' + table + '" WHERE local_id=? AND create_time=? AND server_id=? LIMIT 1',
                     (descriptor['localId'], descriptor['createTime'], int(descriptor['serverId'] or 0))).fetchone()
-                if row and row[0] in (3, 47) and row[0] == descriptor.get('localType', 3):
+                if row and row[0] in (3,47,49,APPMSG_STICKER_TYPE) and row[0] == descriptor.get('dbLocalType',descriptor.get('localType',3)):
                     content = nt._decode_content(row[1])
                     if '@chatroom' in talker:
                         content = nt._strip_group_speaker(content, set(self.names) | {self.own_wxid, descriptor.get('sender', '')})
-                    return {'imageXml': content.lstrip(), 'localType': row[0]}
+                    content=content.lstrip()
+                    if row[0] in (49,APPMSG_STICKER_TYPE):
+                        content=sticker_image_xml(row[0],content)
+                        if content is None:continue
+                    return {'imageXml':content,'localType':47 if row[0] in (49,APPMSG_STICKER_TYPE) else row[0]}
         finally:
             for connection in connections:
                 connection.close()
@@ -486,7 +492,7 @@ class Reader:
         if collected:
             try:resource=collected.resource(image_id,key)
             except (RuntimeError,ValueError,OSError):resource=None
-            if resource:return resource
+            if resource:return stage_sticker_resource(self.root,resource)
         if collected:raise PermissionError('Sticker is not admitted to the shared pool')
         descriptor=self.image_index.get(image_id)
         return self.resolve_received_sticker(image_id,key,descriptor)
@@ -533,7 +539,7 @@ class Reader:
             policy=library.policy()
             if not library.active() or not library.enabled(policy):return
             media=policy.get('media',{})
-            policy_key=json.dumps([media.get('allowStickerCdn') is True,media.get('allowStickerCdnAlias') is True])
+            policy_key=json.dumps(['emojiinfo-v1',media.get('allowStickerCdn') is True,media.get('allowStickerCdnAlias') is True])
             pending=library.pending()
         except (RuntimeError,ValueError,OSError):return
         with self.lock:

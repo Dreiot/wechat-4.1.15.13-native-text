@@ -11,24 +11,16 @@ def normalize_image(raw, animated=False):
         if animated and getattr(source, 'is_animated', False):
             # Bound decoded pixels and frames. A static sheet conveys sampled
             # animation content without repeatedly sending entire animations.
-            budget = min(32, max(1, 80_000_000 // (source.width * source.height)))
-            samples, last = [], None
-            for index in range(budget):
-                try:
-                    source.seek(index)
-                except EOFError:
-                    break
+            budget = min(128, max(1, 80_000_000 // (source.width * source.height)))
+            count=min(getattr(source,'n_frames',1),budget)
+            frames=[]
+            for index in dict.fromkeys((0,(count-1)//2,count-1)):
+                source.seek(index)
                 frame = source.convert('RGBA')
                 frame.thumbnail((384, 384))
                 background = Image.new('RGB', frame.size, 'white')
                 background.paste(frame, mask=frame.getchannel('A'))
-                last = (index, background)
-                if index in (0, 8, 24):
-                    samples.append(last)
-            if last and samples[-1][0] != last[0]:
-                samples.append(last)
-            chosen = [samples[0], samples[len(samples)//2], samples[-1]]
-            frames = [entry[1] for entry in {entry[0]: entry for entry in chosen}.values()]
+                frames.append(background)
             image = Image.new('RGB', (sum(f.width for f in frames), max(f.height for f in frames)), 'white')
             x = 0
             for frame in frames:

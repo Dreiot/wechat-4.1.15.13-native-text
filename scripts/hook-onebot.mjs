@@ -253,7 +253,7 @@ export class HookOneBot {
         let accepted;
         try{accepted=await this.native('/SendStickerMsg',{wxidorgid:wxid,sticker:sticker.fields,path:sticker.path},identity.account);}
         catch(error){if(/^API_HTTP_(400|401|403|409|429)$/.test(error.message)){this.stickerPending.delete(key);this.persistStickerPending();}throw error;}
-        if(accepted?.ret!==0)fail('NATIVE_STICKER_REJECTED');
+        if(accepted?.ret!==0){this.stickerPending.delete(key);this.persistStickerPending();fail('NATIVE_STICKER_REJECTED');}
       }
       const deadline=Date.now()+(this.receiptOverride??this.hook.receiptTimeoutMs??18000);
       do{
@@ -271,7 +271,7 @@ export class HookOneBot {
         }
         await sleep(this.pollMs);
       }while(Date.now()<deadline&&!this.stopped);
-      fail('STICKER_DELIVERY_UNCONFIRMED');
+      throw new AdapterError('STICKER_DELIVERY_UNCONFIRMED',{attempted:true,delivery_id:deliveryId??''});
     }finally{this.targetsSending.delete(key);}
   }
   async action(request) {

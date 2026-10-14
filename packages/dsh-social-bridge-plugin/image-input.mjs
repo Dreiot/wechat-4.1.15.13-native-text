@@ -2,21 +2,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-export async function imageBlocks(ctx,root,conversationKey,images,provider,model) {
+export async function imageBlocks(ctx,root,conversationKey,images,provider,model,{onUnavailable,timeoutMs=25000}={}) {
   if (!Array.isArray(images) || images.length>4) throw new Error('IMAGE_BATCH_LIMIT');
   if (!images.length) return [];
   if (images.some(image=>!/^[a-f0-9]{64}$/.test(image?.id ?? ''))) throw new Error('INVALID_IMAGE_REFERENCE');
   const llm=ctx.get('llm'), attachments=ctx.get('attachments');
   if (!llm || !attachments) throw new Error('NATIVE_IMAGE_SERVICES_UNAVAILABLE');
-  const signal=AbortSignal.timeout(75000);
+  const signal=AbortSignal.timeout(timeoutMs);
   const info=await llm.resolveModelInfo(provider,model,signal);
   if (!info.inputModalities?.includes('image')) throw new Error('MODEL_IMAGE_INPUT_UNSUPPORTED');
   const io=JSON.parse(fs.readFileSync(path.join(root,'state/wechat-io-config.json'),'utf8').replace(/^\uFEFF/,''));
   const base=new URL(io.reader_base_url);
   if (base.protocol!=='http:' || base.hostname!=='127.0.0.1' || base.username || base.password || base.pathname!=='/' || base.search || base.hash) throw new Error('IMAGE_READER_LOOPBACK_REQUIRED');
   const blocks=[];
-  for (const image of images) {
-    const response=await fetch(base.origin+'/api/v1/images/'+image.id,{headers:{Authorization:'Bearer '+io.reader_token},redirect:'error',signal});
+  for (const [index,image] of images.entries()) {
+    try {
+    const response=await fetch(base.origin+'/api/v1/images/'+image.id,{headers:{Authorization:'Bearer '+io.reader_token},redirect:'error',signal:AbortSignal.any([signal,AbortSignal.timeout(12000)])});
     if (!response.ok) {
       const failure = await response.json().catch(() => ({}));
       const error = new Error('IMAGE_READER_NOT_READY');
@@ -30,6 +31,12 @@ export async function imageBlocks(ctx,root,conversationKey,images,provider,model
     if (!data.length || data.length>768*1024 || data.toString('base64')!==content.b64 || crypto.createHash('sha256').update(data).digest('hex')!==content.sha256) throw new Error('IMAGE_INTEGRITY_FAILED');
     const attachment=await attachments.saveImage({data,mediaType:content.mime,name:'wechat-image-'+image.id.slice(0,12)});
     blocks.push({type:'image',attachment});
+    } catch(error) {
+      const unavailable=error.message==='IMAGE_READER_NOT_READY'||['TimeoutError','AbortError'].includes(error.name);
+      if(!onUnavailable||!unavailable)throw error;
+      onUnavailable({id:image.id,index,code:error.imageError??(error.name==='TimeoutError'||error.name==='AbortError'?'IMAGE_PROCESS_TIMEOUT':'IMAGE_READER_NOT_READY')});
+      blocks.push({type:'text',text:`[本轮附图 I${index+1} 读取失败，未提供画面；不要猜测内容。其余成功附图仍可使用。]`});
+    }
   }
   return blocks;
 }

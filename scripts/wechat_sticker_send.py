@@ -1,11 +1,44 @@
 """Extract only cached-native forwarding fields from a bound sticker message."""
 import re
 import io
+import hashlib
+import pathlib
+import uuid
 import xml.etree.ElementTree as ET
 from PIL import Image
 from wechat_sticker import emoji_attributes
 
 APPMSG_STICKER_TYPE = 8 * 2**32 + 49
+
+
+def stage_sticker_resource(root,resource):
+    """Prepare a verified pool GIF for the native sender's strict path guard."""
+    root=pathlib.Path(root).resolve()
+    scope=(root/'state/stickers').resolve()
+    source=pathlib.Path(resource['path']).resolve()
+    fields=resource.get('fields',{});md5=fields.get('md5','')
+    if not scope.is_relative_to(root) or not source.is_relative_to(scope) or resource.get('format')!='gif' or not re.fullmatch('[a-f0-9]{32}',md5):
+        raise RuntimeError('STICKER_CACHE_PATH_INVALID')
+    if not source.is_file() or not 0<source.stat().st_size<=8*1024*1024:
+        raise RuntimeError('STICKER_CACHE_INTEGRITY_FAILED')
+    with source.open('rb') as stream:raw=stream.read(8*1024*1024+1)
+    if not raw.startswith((b'GIF87a',b'GIF89a')) or hashlib.md5(raw).hexdigest()!=md5 or type(fields.get('len')) is not int or len(raw)!=fields['len']:
+        raise RuntimeError('STICKER_CACHE_INTEGRITY_FAILED')
+    folder=root/'state/stickers/outgoing'
+    if folder.is_symlink() or not folder.resolve().is_relative_to(scope):
+        raise RuntimeError('STICKER_CACHE_PATH_INVALID')
+    folder.mkdir(parents=True,exist_ok=True)
+    file=folder/(md5+'.gif')
+    if file.is_symlink():raise RuntimeError('STICKER_CACHE_PATH_INVALID')
+    if file.exists():
+        if file.stat().st_size!=len(raw) or file.read_bytes()!=raw:raise RuntimeError('STICKER_CACHE_INTEGRITY_FAILED')
+    else:
+        temp=folder/(md5+'.'+uuid.uuid4().hex+'.tmp')
+        try:
+            temp.write_bytes(raw);temp.replace(file)
+        finally:
+            if temp.exists():temp.unlink()
+    return {**resource,'path':str(file.resolve())}
 
 
 def native_gif_bytes(raw):
@@ -14,12 +47,18 @@ def native_gif_bytes(raw):
     if raw.startswith((b'GIF87a',b'GIF89a')):return raw
     try:
         with Image.open(io.BytesIO(raw)) as image:
-            if image.format not in ('JPEG','PNG','WEBP') or getattr(image,'n_frames',1)!=1:
+            if image.format not in ('JPEG','PNG','WEBP'):
                 raise RuntimeError('STICKER_NATIVE_FORMAT_UNSUPPORTED')
             if not 0<image.width<=4096 or not 0<image.height<=4096:
                 raise RuntimeError('STICKER_NATIVE_IMAGE_TOO_LARGE')
+            count=getattr(image,'n_frames',1)
+            if count>64 or count*image.width*image.height>80_000_000:
+                raise RuntimeError('STICKER_NATIVE_IMAGE_TOO_LARGE')
+            frames=[];durations=[]
+            for index in range(count):
+                image.seek(index);frames.append(image.convert('RGBA'));durations.append(max(20,min(10000,int(image.info.get('duration',100)))))
             output=io.BytesIO()
-            image.convert('RGBA').save(output,format='GIF')
+            frames[0].save(output,format='GIF',save_all=count>1,append_images=frames[1:],duration=durations if count>1 else durations[0],loop=image.info.get('loop',0))
             result=output.getvalue()
             if not result or len(result)>8*1024*1024:raise RuntimeError('STICKER_NATIVE_IMAGE_TOO_LARGE')
             return result

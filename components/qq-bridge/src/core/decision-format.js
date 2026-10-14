@@ -7,6 +7,10 @@ export function hasStickerControl(text) {
   return /[\[［【]\s*(?:S\d+\s*(?:[\]］】]|$)|STICKER\s*[:：])/i.test(String(text ?? ''));
 }
 
+export function hasReasoningControl(text) {
+  return /<\/?(?:think|thinking|analysis|reasoning)(?:\s[^>]*)?>|<\|(?:im_start|im_end|analysis|channel|end)\|>|(?:^|\n)\s*(?:#{1,6}\s*)?(?:思考(?:过程|内容|链)?|内部(?:分析|推理|思考)|推理过程|分析过程|analysis|reasoning|thinking)\s*[:：\n]/i.test(String(text ?? ''));
+}
+
 function shortStickerDecision(text, stickerRefs) {
   const short = /^\[\s*(?:STICKER\s*:\s*)?(S[1-3])\s*\]$/i.exec(text);
   if (!short) return null;
@@ -19,16 +23,17 @@ function shortStickerDecision(text, stickerRefs) {
 
 export function parseSocialDecision(output, stickerRefs = {}) {
   const text = String(output ?? '').trim().replace(/^```(?:text|plaintext)?\s*\n([\s\S]*?)\n```$/i, '$1').trim();
+  if (hasReasoningControl(text)) return { decision: 'INVALID', text: '' };
   if (/^\[?SILENT\]?$/i.test(text)) return { decision: 'SILENT', text: '' };
   if (/^(OBSERVE|DEFER)$/i.test(text)) return { decision: text.toUpperCase(), text: '' };
   const standalone = shortStickerDecision(text, stickerRefs);
   if (standalone) return standalone;
   // Accept the explicit localized envelope seen in persona replies. Unmarked
   // prose still requires a model correction; it may contain internal reasoning.
-  const tagged = /^(?:RESPOND|回复)\s*[:：]\s*([\s\S]+)$/i.exec(text)
-    ?? /(?:^|\n)[^\n]*\bRESPOND\s*[:：]\s*([^\n]+)\s*$/i.exec(text);
+  const tagged = /^(?:RESPOND|回复)\s*[:：]\s*([\s\S]+)$/i.exec(text);
   if (!tagged) return { decision: 'INVALID', text: '' };
   const reply = tagged[1].trim();
+  if (hasReasoningControl(reply)) return { decision: 'INVALID', text: '' };
   if (!reply) return { decision: 'INVALID', text: '' };
   if (/^\[?SILENT\]?$/i.test(reply)) return { decision: 'SILENT', text: '' };
   const sticker = /^\[STICKER:([a-f0-9]{64})\]$/.exec(reply);
@@ -47,7 +52,7 @@ export async function resolveSocialDecision({ rawOutput, key, metadata, decide, 
   const repairMetadata = { ...metadata };
   // A distinct, deterministic identity bypasses the malformed cached result
   // without creating another model correction on each replay of this batch.
-  if (metadata.batchId) repairMetadata.batchId = crypto.createHash('sha256').update(metadata.batchId + '\0format-repair-v2').digest('hex');
+  if (metadata.batchId) repairMetadata.batchId = crypto.createHash('sha256').update(metadata.batchId + '\0format-repair-v3').digest('hex');
   delete repairMetadata.searchTicket;
   delete repairMetadata.searchContext;
   const previous = output.text.slice(0, 2000).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');

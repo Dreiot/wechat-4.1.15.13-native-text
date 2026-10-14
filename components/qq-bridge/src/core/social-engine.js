@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { CHAT_POLICY_NOTICE, CHAT_COHERENCE_NOTICE, LOCKED_BEHAVIOR_REPLY, isBehaviorChangeCommand } from './chat-policy.js';
 import { normalizeForwardedRecord, forwardedRecordText, normalizeQuoteReply, quoteReplyText } from './wechat-events.js';
 import { selectStickerChoices, cleanStickerLabel, stickerPolicyKey } from './sticker-policy.js';
-import { SOCIAL_OUTPUT_NOTICE, resolveSocialDecision, hasStickerControl } from './decision-format.js';
+import { SOCIAL_OUTPUT_NOTICE, resolveSocialDecision, hasStickerControl, hasReasoningControl } from './decision-format.js';
 export { parseSocialDecision } from './decision-format.js';
 import {SEARCH_DEFAULTS,searchPolicyKey,searchQuery} from '../../../../packages/dsh-social-bridge-plugin/search-policy.mjs';
 
@@ -263,6 +263,9 @@ export class SocialEngine {
         ? await resolveSocialDecision({rawOutput,key,metadata,decide:(...args)=>this.decide(...args),stickerRefs,log:this.log})
         : {output:null,result:remembered?.result??{decision:'RESPOND',text:LOCKED_BEHAVIOR_REPLY}};
       const {output,result}=resolved;
+      if(result.decision==='RESPOND'&&[result.text,...(result.textParts??[])].some(hasReasoningControl)){
+        this.decisions.delete(key);this.buffer.forgetReply(key);this.dirty.add(key);throw new Error('INVALID_DECISION_FORMAT: reasoning in cached text');
+      }
       if (result.decision === 'INVALID') throw new Error('INVALID_DECISION_FORMAT');
       if (result.decision === 'RESPOND' && [result.text, ...(result.textParts ?? [])].some(hasStickerControl)) throw new Error('INVALID_DECISION_FORMAT: sticker reference in cached text');
       if(!remembered?.sending&&stickerPolicyKey(await this.stickerPolicyFor(message))!==policyKey){this.decisions.delete(key);this.dirty.add(key);return;}
@@ -293,6 +296,14 @@ export class SocialEngine {
       completed = true;
     } catch (error) {
       const pending=this.decisions.get(key);
+      if(pending&&(pending.result.decision==='STICKER'||pending.result.stickerId)&&error?.code&&error.code!=='STICKER_SENDING_DISABLED'){
+        // A failed sticker must not pin every later message to this decision.
+        // Do not retry an uncertain native send; retain an accurate context
+        // notice and let the next incoming batch make a fresh decision.
+        this.buffer.completeReply(key,pending,null);this.decisions.delete(key);
+        this.buffer.setContextNotice(key,{id:pending.deliveryId,text:'本机上一轮表情发送失败或未能确认送达，不能当成对方已收到；不自动重发，继续回应新消息。'});
+        completed=true;
+      }
       if(pending&&error?.code==='STICKER_SENDING_DISABLED'){
         const prepared={...pending,sending:false};this.decisions.set(key,prepared);this.buffer.rememberReply(key,prepared);
       }

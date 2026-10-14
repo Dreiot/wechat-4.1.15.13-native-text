@@ -29,3 +29,12 @@
 | `NO_NEW_SERVER_RECEIPT` | 实际发出记录与新的服务器消息 ID |
 
 此文档说明接入契约，不提供第三方分发授权或平台使用许可。
+
+
+## 0.3.4 初始化与首次连接
+
+version.dll 的加载入口只安排初始化工作；核心模块 Weixin.dll 就绪后再执行一次 Hook 初始化，最多等待 30 秒。启动检查可短暂等待发送后端，版本、令牌和账号异常不盲目重试。HTTP 服务只有绑定本机端口后才算就绪。
+
+在运行日志查看 hook-init.log：waiting_for_weixin_dll 表示等待核心模块，weixin_dll_ready 表示模块已就绪，http_listening 表示端口已绑定，initialization_ready 表示初始化完成；module_wait_timeout 表示等待超时，http_bind_failed 表示端口无法绑定。日志不记录令牌、读取密钥或聊天内容。
+
+升级需从托盘完整退出匹配微信后再通过助手“打开微信”，以加载新的 DLL。

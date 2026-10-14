@@ -151,7 +151,7 @@ try {
     }
     if ($hookSender) {
         & $node (Join-Path $PSScriptRoot 'hook-onebot.mjs') --check
-        if ($LASTEXITCODE -ne 0) { throw 'WeChat-Hook is not ready. Open Launch-Hook-WeChat.cmd, log in to the configured account, then start again. See state/logs/reader.stderr.log for receiver errors.' }
+        if ($LASTEXITCODE -ne 0) { throw 'WeChat-Hook is not ready. Use Open WeChat in WeChatAgent, finish login, then start again. Check the error above and state/logs/hook-init.log for native initialization details.' }
     }
     $env:SOCIAL_DSH_TOKEN = (Get-Content (Join-Path $stateDir 'social-dsh-token.txt') -Raw).Trim()
     $dshUrl = 'http://127.0.0.1:'+$config.ports.dshPlugin+'/health'

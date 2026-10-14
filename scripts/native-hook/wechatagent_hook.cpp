@@ -18,6 +18,7 @@
 #include "sticker_sender.h"
 #include "global.h"
 #include "wechatagent_hook.h"
+#include "deferred_init.h"
 
 using json = nlohmann::json;
 static std::timed_mutex sendMutex;
@@ -166,7 +167,8 @@ void RegisterWeChatAgentRoutes(httplib::Server& server) {
     server.Get("/WeChatAgent/health", [authorized](const httplib::Request& req, httplib::Response& res) {
         if (!authorized(req, res)) return;
         json data = {{"backend", "wechat-hook"}, {"integration", "WeChatAgent-1"},
-            {"version", CoreVersion()}, {"pid", GetCurrentProcessId()}, {"databaseAccounts", DatabaseAccounts()}, {"nativeStickerSend",StickerReady()}};
+            {"version", CoreVersion()}, {"pid", GetCurrentProcessId()}, {"databaseAccounts", DatabaseAccounts()}, {"nativeStickerSend",StickerReady()},
+            {"initialization", "deferred-module-v1"}, {"startupState", WeChatAgentInitState()}};
         res.set_content(data.dump(), "application/json");
     });
     server.Post("/SendStickerMsg",[authorized](const httplib::Request& req,httplib::Response& res){

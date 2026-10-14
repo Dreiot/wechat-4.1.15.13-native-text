@@ -89,7 +89,14 @@ export class HookOneBot {
     const reader = await this.reader('/api/v1/reader/status');
     if (reader.backend !== 'weflow-cli-nt' || !reader.ownWxid || !reader.accountDirectory) fail('READER_ACCOUNT_METADATA_REQUIRED');
     this.ownWxid = reader.ownWxid;
-    const native = await this.native('/WeChatAgent/health');
+    const native = await this.native('/WeChatAgent/health').catch(error => {
+      if(error instanceof AdapterError)throw error;
+      const code=error?.cause?.code??error?.code;
+      if(code==='ECONNREFUSED')fail('HOOK_NOT_LISTENING');
+      if(error?.name==='TimeoutError'||['ETIMEDOUT','UND_ERR_CONNECT_TIMEOUT','UND_ERR_HEADERS_TIMEOUT'].includes(code))fail('HOOK_HEALTH_TIMEOUT');
+      if(error instanceof SyntaxError)fail('HOOK_HEALTH_INVALID_RESPONSE');
+      throw error;
+    });
     this.status.native_sticker_send = native.nativeStickerSend===true;
     this.status.hook_connected = true; this.status.version = native.version ?? '';
     if (native.integration !== 'WeChatAgent-1' || native.backend !== 'wechat-hook') fail('REVIEWED_HOOK_BUILD_REQUIRED');
@@ -98,6 +105,19 @@ export class HookOneBot {
         native.databaseAccounts[0] !== reader.accountDirectory.toLowerCase()) fail('HOOK_ACCOUNT_NOT_READY');
     this.status.hook_account_verified = true;
     return { account: reader.accountDirectory.toLowerCase(), selfId: onebotId(reader.ownWxid) };
+  }
+  async waitForNative({timeoutMs=35000,intervalMs=250,onWaiting=()=>{}}={}) {
+    if(!Number.isFinite(timeoutMs)||timeoutMs<1||timeoutMs>60000||!Number.isFinite(intervalMs)||intervalMs<1)fail('INVALID_HOOK_WAIT');
+    const deadline=Date.now()+timeoutMs;let notified=false;
+    for(;;){
+      try{return await this.checkNative();}
+      catch(error){
+        if(!(error instanceof AdapterError)||!['HOOK_NOT_LISTENING','HOOK_HEALTH_TIMEOUT'].includes(error.message))throw error;
+        if(Date.now()>=deadline)fail('HOOK_INITIALIZATION_TIMEOUT');
+        if(!notified){notified=true;onWaiting();}
+        await new Promise(resolve=>setTimeout(resolve,Math.min(intervalMs,Math.max(1,deadline-Date.now()))));
+      }
+    }
   }
   async resolveTarget(kind, target) {
     const data = await this.reader('/api/v1/sessions?limit=500');
@@ -440,7 +460,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const adapter = new HookOneBot();
   try {
     if (process.argv.includes('--check')) {
-      await adapter.checkNative(); console.log('WeChat-Hook: matching version and selected account database verified.');
+      await adapter.waitForNative({onWaiting:()=>console.log('WeChat-Hook: waiting for the matching client initialization...')}); console.log('WeChat-Hook: matching version and selected account database verified.');
     } else {
       await adapter.start();
       for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, async () => { await adapter.stop(); process.exit(0); });

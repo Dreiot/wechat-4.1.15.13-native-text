@@ -37,6 +37,11 @@ export function webUrls(text, limit = WEB_READER_LIMITS.pages) {
   // Do not extract a domain from an email address, filename or another URL's path.
   const pattern = /(?<![a-z0-9_./:@%+-])(?:https?:\/\/|www\.|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:com|cn|net|org|tv|io|dev|edu|gov|co|me|info|app|ai|xyz|top|cc|uk|de|jp|hk|tw)(?=[:/?#\s<>"'`\\\u0000-\u001f。，；！？、：）】》」』)\]}]|$))[^\s<>"'`\\\u0000-\u001f。，；！？、：）】》」』]*/gi;
   for (let raw of String(text).match(pattern) ?? []) {
+    // A pasted ASCII path/query can touch a Chinese request. Keep actual Chinese
+    // URL segments and query values, rather than treating every Han character as
+    // a delimiter. Only an unmistakable request after a nonempty ASCII tail ends it.
+    const suffix = /(?<=[a-z0-9_~.%)-])(?:帮我|帮忙|请(?:你)?|麻烦(?:你)?|能不能|可不可以|你(?:再)?试试)(?:再|先|帮我|试试)?(?:看看|看下|看一下|查查|查下|查一下|问问|读一下|总结|概括|分析|解释|提取|打开|搜索|搜一下|告诉我)/iu.exec(raw);
+    if (suffix && !/[/?#=&%]|\.[a-z0-9]{1,8}(?:$|[?#])/i.test(raw.slice(suffix.index))) raw = raw.slice(0, suffix.index);
     raw = raw.replace(/[。，；！？、：）】》」』]+$/u, '');
     while (/[)\]]$/.test(raw) && (raw.match(/[)\]]/g)?.length ?? 0) > (raw.match(/[(\[]/g)?.length ?? 0)) raw = raw.slice(0, -1);
     try { const url = normalizeWebUrl(raw); if (!urls.includes(url)) urls.push(url); } catch {}

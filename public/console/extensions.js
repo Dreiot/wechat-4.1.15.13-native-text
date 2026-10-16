@@ -1,18 +1,17 @@
+import {createExtensionMarket} from './extension-market.js';
 import {createDshAccessUI} from './dsh-access.js';
 export function createExtensionUI({api,modal,closeModal,confirmAction,escapeHtml:esc,icon,state,renderPage,toast,onDshSave,onProjectSave}) {
   const permissionLabels={web_fetch:'访问公开网络',history_read:'读取当前聊天历史',storage:'保存当前聊天的数据',reply:'申请向当前聊天回复'};
   const dshUI=createDshAccessUI({api,modal,closeModal,escapeHtml:esc,icon,state,renderPage,toast,onSave:onDshSave});
   let catalog,opening=false;
+  const market=createExtensionMarket({api,modal,toast,escapeHtml:esc,icon});
   const names=key=>state.names.get(key) ?? key;
   const summary=item=>item.featureState?`功能默认值：${item.featureState.globalEnabled?'开启':'关闭'} · 当前开启 ${item.featureState.effectiveCount}/${item.featureState.totalCount} 个允许的聊天`:
     `扩展开关：${item.enabled?'已开启':'已关闭'} · 聊天范围：${item.chats===null?'所有允许的聊天':(item.chats??[]).length+' 个聊天'}`;
   const status=item=>`<span class="status-tag ${esc(item.statusTone??'')}" data-extension-status>${esc(item.statusLabel ?? (item.enabled?'已开启':'已关闭'))}</span>`;
   async function page() {
     catalog=await api('/api/extensions');
-    const dshPage=await dshUI.page();
-    const items=catalog.extensions,enabled=items.filter(item=>['已开启','部分开启'].includes(item.statusLabel)).length;
-    return dshPage+`<section class="card"><div class="card-header"><div><h2>微信功能设置</h2><p class="card-description">点击卡片查看开关和适用聊天。当前开启 ${enabled} 项，共 ${items.length} 项。</p></div>${catalog.canImport===false?'':`<button class="button primary" id="import-extension">${icon('plus')}导入扩展</button>`}</div><p class="card-description">${catalog.runtimeConnected?'DSH 已连接。设置保存后在后续聊天中应用。':'DSH 暂未连接；已保存的开关仍会显示，运行状态待连接后确认。'}</p><a class="text-link" href="https://github.com/sourcepro5/WeChatAgent" target="_blank" rel="noopener noreferrer">项目说明 ${icon('arrow')}</a></section>`+
-      (items.length?items.map(item=>`<section class="card extension-card" data-extension-card="${esc(item.id)}"><div class="card-header"><div><h2><button class="extension-title" data-extension="${esc(item.id)}" aria-label="查看${esc(item.name)}设置">${esc(item.name)}</button></h2><p class="card-description">${esc(item.description)}</p></div>${status(item)}</div><p class="extension-summary">${esc(summary(item))}</p><p class="card-description">${esc(item.reason??'')} · ${item.builtin?'内置'+(item.kind==='plugins'?'插件':'技能'):item.format==='markdown'?'说明型技能':'工具型扩展'} · ${esc(item.version??'清单无效')}</p><div class="button-row"><button class="button" data-extension="${esc(item.id)}">查看开关与聊天范围</button>${item.builtin||item.bundled?'':`<button class="button" data-uninstall-extension="${esc(item.id)}">卸载</button>`}</div></section>`).join(''):`<section class="card"><div class="empty-state">${icon('plug')}<h3>还没有扩展</h3><p>导入包含 SKILL.md、skill.json 或 plugin.json 的本地目录。</p></div></section>`);
+    return market.page(catalog,await dshUI.page());
   }
   const footer=()=>'<p class="extension-error" id="extension-error" role="alert" hidden></p><div class="modal-actions"><button class="button" type="button" data-close>取消</button><button class="button primary" type="submit">保存扩展设置</button></div>';
   function errorInForm(error) {const field=document.querySelector('#extension-error');if(field){field.textContent=error.message;field.hidden=false;}else toast(error.message);}
@@ -45,7 +44,7 @@ export function createExtensionUI({api,modal,closeModal,confirmAction,escapeHtml
   }
   async function projectDialog(item) {
     const saved=await api('/api/config'),settings=saved.config.wechat?.[item.feature] ?? {},chats=
-      ['private','group'].flatMap(kind=>(saved.config.wechat.whitelist[kind==='group'?'groups':'private']??[]).map(id=>'wechat:'+kind+':'+id));
+      (item.groupOnly?['group']:['private','group']).flatMap(kind=>(saved.config.wechat.whitelist[kind==='group'?'groups':'private']??[]).map(id=>'wechat:'+kind+':'+id));
     const enabled=settings.enabled??item.defaultEnabled;
     const rows=chats.map(key=>{
       const value=settings.chats?.[key];
@@ -55,7 +54,7 @@ export function createExtensionUI({api,modal,closeModal,confirmAction,escapeHtml
       const selected=item.chatMode==='context'?value!==0:value===true;
       return `<label class="extension-option"><input type="checkbox" data-feature-chat="${esc(key)}" ${selected?'checked':''}>${esc(names(key))}${item.chatMode==='context'?' · '+(value??settings.maxTokens??100000)+' token':''}${badge}</label>`;
     }).join('');
-    modal(item.name,`<form id="extension-form"><p class="extension-summary" id="extension-effective-summary"></p><label class="extension-option"><input type="checkbox" id="extension-enabled" aria-label="${item.chatMode==='override'?'全局默认开启':'启用此功能'}" ${enabled?'checked':''}>${item.chatMode==='override'?'全局默认开启':'启用此功能'} <strong id="extension-toggle-state">${enabled?'已开启':'已关闭'}</strong></label><p class="modal-description">${item.chatMode==='override'?'单个聊天可覆盖全局默认值，实际开启范围见下方。':item.chatMode==='selected'?'总开关开启后，只向下方勾选的聊天主动发送。':item.chatMode==='context'?'总开关开启后，向勾选的聊天应用现有压缩阈值。':'对所有已允许的聊天生效。'}保存后生效。</p><fieldset class="extension-fieldset"><legend>聊天范围</legend>${rows||'<p class="card-description">尚未选择聊天，请先到聊天范围添加。</p>'}</fieldset><a class="text-link" href="#behavior" data-extension-config>更多功能设置</a>${footer()}</form>`);
+    modal(item.name,`<form id="extension-form"><p class="extension-summary" id="extension-effective-summary"></p><label class="extension-option"><input type="checkbox" id="extension-enabled" aria-label="${item.chatMode==='override'?'全局默认开启':'启用此功能'}" ${enabled?'checked':''}>${item.chatMode==='override'?'全局默认开启':'启用此功能'} <strong id="extension-toggle-state">${enabled?'已开启':'已关闭'}</strong></label><p class="modal-description">${item.chatMode==='override'?'单个聊天可覆盖全局默认值，实际开启范围见下方。':item.chatMode==='selected'?'总开关开启后，只向下方勾选的聊天主动发送。':item.chatMode==='context'?'总开关开启后，向勾选的聊天应用现有压缩阈值。':'对所有已允许的聊天生效。'}保存后生效。</p>${item.id==='dsh-meme'?`<div class="meme-import-option"><label class="extension-option"><input id="meme-allow-import" type="checkbox" ${settings.allowImport?'checked':''}>允许联网补图入库</label><small>还需为相应聊天开启联网搜索；已有图库检索不需要联网。新图会提交给当前 DSH 模型核验并产生模型消耗。本次发送无需等待收藏；长期收藏仍限 50 张，满池由 DS 筛选。</small><a class="text-link" href="https://github.com/yyh-001/dsh-meme#安装" target="_blank" rel="noopener noreferrer">查看官方安装说明</a></div>`:''}<fieldset class="extension-fieldset"><legend>聊天范围</legend>${rows||'<p class="card-description">尚未选择聊天，请先到聊天范围添加。</p>'}</fieldset><a class="text-link" href="#behavior" data-extension-config>更多功能设置</a>${footer()}</form>`);
     const form=document.querySelector('#extension-form');watchToggle(form);
     const paintProject=()=>{
       const global=form.querySelector('#extension-enabled').checked;let count=0;
@@ -71,7 +70,7 @@ export function createExtensionUI({api,modal,closeModal,confirmAction,escapeHtml
     form.addEventListener('submit',async event=>{
       event.preventDefault();const button=event.submitter;button.disabled=true;
       const chatSettings=Object.fromEntries([...form.querySelectorAll('[data-feature-chat]')].map(input=>[input.dataset.featureChat,input.tagName==='SELECT'?input.value==='inherit'?'inherit':input.value==='on':input.checked]));
-      try{const result=await api('/api/extensions/'+item.id,{revision:saved.revision,enabled:form.querySelector('#extension-enabled').checked,chatSettings});onProjectSave?.(result,item.feature);closeModal();await renderPage();toast('扩展设置已保存，列表状态已更新。');}
+      try{const result=await api('/api/extensions/'+item.id,{revision:saved.revision,enabled:form.querySelector('#extension-enabled').checked,chatSettings,...(item.id==='dsh-meme'?{settings:{allowImport:form.querySelector('#meme-allow-import').checked}}:{})});onProjectSave?.(result,item.feature);closeModal();await renderPage();toast('扩展设置已保存，列表状态已更新。');}
       catch(error){errorInForm(error);button.disabled=false;}
     });
   }

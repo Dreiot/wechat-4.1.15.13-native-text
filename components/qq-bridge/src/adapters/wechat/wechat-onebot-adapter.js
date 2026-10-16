@@ -78,11 +78,11 @@ export class WechatOneBotAdapter extends BaseAdapter {
     const result=await this.server.action('get_sticker_list',{kind,target:String(target),...(typeof query==='string'&&query.trim()?{query:query.slice(0,500)}:{})});
     return result.data?.enabled?(result.data.stickers??[]):[];
   }
-  async sendSticker({kind,target,id,deliveryId}){
+  async sendSticker({kind,target,id,deliveryId,receiptOnly=false}){
     if(!['private','group'].includes(kind)||!/^[a-f0-9]{64}$/.test(id))throw new TypeError('invalid sticker target');
     let result;
     try{result=await this.server.action(kind==='group'?'send_group_msg':'send_private_msg',{
-      [kind==='group'?'group_id':'user_id']:Number(target),message:[{type:'wechat_sticker',data:{id}}],...(deliveryId?{wechatagent_delivery_id:deliveryId}:{})});}
+      [kind==='group'?'group_id':'user_id']:Number(target),message:[{type:'wechat_sticker',data:{id}}],...(deliveryId?{wechatagent_delivery_id:deliveryId}:{}),...(receiptOnly?{wechatagent_receipt_only:true}:{})});}
     catch(error){
       if(error.code!=='STICKER_DELIVERY_UNCONFIRMED'||error.data?.attempted!==true)throw error;
       this.log(`[WeChat] sticker_delivery_unconfirmed operation=${String(deliveryId??'').slice(0,12)}`);

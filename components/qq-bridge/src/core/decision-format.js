@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
 import { splitStickerLabels } from './sticker-policy.js';
 
-export const SOCIAL_OUTPUT_NOTICE = '发送协议（仅包装回复，不改变人格、语气或正文标点）：需要回复时，第一行必须以英文 RESPOND: 开头，后面接真正要发的正文，可保留空格和换行；沉默时仅输出 SILENT。标记由程序移除，不会发给对方。人格示例中的“你：”“回复：”是示例说话人，不是发送协议；不要翻译标记、添加说话人或内部推理，也不要用 Markdown 包裹标记。表情候选编号不能写进文字正文；仅能按本轮候选使用 [STICKER:编号] 发送表情，未提供候选时只回复文字或沉默。';
+import { SOCIAL_PROTOCOL_NOTICE } from '../../../../packages/dsh-social-bridge-plugin/prompt-context.mjs';
+export const SOCIAL_OUTPUT_NOTICE = SOCIAL_PROTOCOL_NOTICE;
 
 export function hasStickerControl(text) {
   return /[\[［【]\s*(?:S\d+\s*(?:[\]］】]|$)|STICKER\s*[:：])/i.test(String(text ?? ''));
@@ -21,7 +22,7 @@ function shortStickerDecision(text, stickerRefs) {
     : { decision: 'INVALID', text: '' };
 }
 
-export function parseSocialDecision(output, stickerRefs = {}) {
+export function parseSocialDecision(output, stickerRefs = {}, {allowStickerCaption=false,allowTextParts=true} = {}) {
   const text = String(output ?? '').trim().replace(/^```(?:text|plaintext)?\s*\n([\s\S]*?)\n```$/i, '$1').trim();
   if (hasReasoningControl(text)) return { decision: 'INVALID', text: '' };
   if (/^\[?SILENT\]?$/i.test(text)) return { decision: 'SILENT', text: '' };
@@ -34,19 +35,33 @@ export function parseSocialDecision(output, stickerRefs = {}) {
   if (!tagged) return { decision: 'INVALID', text: '' };
   const reply = tagged[1].trim();
   if (hasReasoningControl(reply)) return { decision: 'INVALID', text: '' };
+  const response=value=>{
+    const text=value.trim().slice(0,1200);
+    const paragraphs=allowTextParts?text.split(/\r?\n[ \t]*\r?\n(?:[ \t]*\r?\n)*/).map(part=>part.trim()).filter(Boolean):[];
+    const textParts=paragraphs.length<2?null:[paragraphs[0],paragraphs.slice(1).join('\n\n')];
+    if(!textParts)return {decision:'RESPOND',text};
+    return {decision:'RESPOND',text:textParts.join('\n\n'),textParts};
+  };
   if (!reply) return { decision: 'INVALID', text: '' };
   if (/^\[?SILENT\]?$/i.test(reply)) return { decision: 'SILENT', text: '' };
   const sticker = /^\[STICKER:([a-f0-9]{64})\]$/.exec(reply);
   if (sticker) return { decision: 'STICKER', stickerId: sticker[1], text: '' };
   const short = shortStickerDecision(reply, stickerRefs);
   if (short) return short;
+  const caption = /^([\s\S]+?)\n\[STICKER:(S[1-3]|[a-f0-9]{64})\]$/.exec(reply);
+  if (allowStickerCaption && caption) {
+    const stickerId = stickerRefs[caption[2]] ?? (/^[a-f0-9]{64}$/.test(caption[2]) ? caption[2] : null);
+    if (stickerId && caption[1].trim() && !hasStickerControl(caption[1])) {
+      return { ...response(caption[1]), stickerId };
+    }
+  }
   if (hasStickerControl(reply)) return { decision: 'INVALID', text: '' };
-  return { decision: 'RESPOND', text: reply.slice(0, 1200) };
+  return response(reply);
 }
 
-export async function resolveSocialDecision({ rawOutput, key, metadata, decide, stickerRefs = {}, log = () => {} }) {
+export async function resolveSocialDecision({ rawOutput, key, metadata, decide, stickerRefs = {}, allowStickerCaption=false, allowTextParts=true, log = () => {} }) {
   let output = splitStickerLabels(rawOutput);
-  let result = parseSocialDecision(output.text, stickerRefs);
+  let result = parseSocialDecision(output.text, stickerRefs, {allowStickerCaption,allowTextParts});
   if (result.decision !== 'INVALID') return { output, result };
   log(`[Social] ${key} format_repair reason=${output.text.trim() ? 'invalid' : 'empty'}`);
   const repairMetadata = { ...metadata };
@@ -63,6 +78,6 @@ export async function resolveSocialDecision({ rawOutput, key, metadata, decide, 
     (choices.length ? `如需原生表情，仅可输出 RESPOND: [STICKER:S编号]，本轮允许 ${choices.join('、')}；不能使用其他编号。\n` : '本次仅允许文字回复或沉默，不使用历史表情编号。\n') +
     SOCIAL_OUTPUT_NOTICE;
   output = splitStickerLabels(await decide(key, prompt, repairMetadata));
-  result = parseSocialDecision(output.text, stickerRefs);
+  result = parseSocialDecision(output.text, stickerRefs, {allowStickerCaption,allowTextParts});
   return { output, result };
 }

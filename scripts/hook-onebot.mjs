@@ -219,7 +219,7 @@ export class HookOneBot {
     fs.writeFileSync(temp,JSON.stringify({version:1,attempts:[...this.stickerPending].map(([key,item])=>[key,{...item,baseline:[...item.baseline]}])}),{mode:0o600});
     fs.renameSync(temp,this.stickerStateFile);
   }
-  async sendSticker(kind,target,id,deliveryId){
+  async sendSticker(kind,target,id,deliveryId,receiptOnly=false){
     this.reload();
     if(!this.allowed(kind,target))fail('CONVERSATION_NOT_ALLOWED');
     if(!/^[a-f0-9]{64}$/.test(id))fail('INVALID_STICKER_REFERENCE');
@@ -242,10 +242,11 @@ export class HookOneBot {
       let attempt=this.stickerPending.get(key);
       if(attempt && attempt.id!==id)fail('STICKER_PREVIOUS_DELIVERY_UNCONFIRMED');
       if(attempt && (attempt.account!==identity.account || attempt.wxid!==wxid))fail('STICKER_DELIVERY_ACCOUNT_MISMATCH');
+      if(receiptOnly&&(!attempt||attempt.deliveryId&&attempt.deliveryId!==deliveryId))fail('STICKER_RECEIPT_STATE_UNAVAILABLE');
       if(!attempt){
       const sticker=await this.reader('/api/v1/stickers/'+id+'?conversationKey='+encodeURIComponent(conversationKey));
       if(sticker.id!==id || sticker.conversationKey!==conversationKey || !/^[a-f0-9]{32}$/.test(sticker.fields?.md5??''))fail('STICKER_BINDING_INVALID');
-        attempt={id,md5:sticker.fields.md5,account:identity.account,wxid,baseline:new Set((await this.messages(wxid)).map(keyOf)),started:Math.floor(Date.now()/1000)-1};
+        attempt={id,md5:sticker.fields.md5,account:identity.account,wxid,deliveryId,baseline:new Set((await this.messages(wxid)).map(keyOf)),started:Math.floor(Date.now()/1000)-1};
         this.reload();if(!this.allowed(kind,target))fail('CONVERSATION_NOT_ALLOWED');
         if(!stickerPolicy(this.project.wechat,conversationKey).enabled)fail('STICKER_SENDING_DISABLED');
         this.stickerPending.set(key,attempt);
@@ -269,6 +270,7 @@ export class HookOneBot {
             return response;
           }
         }
+        if(receiptOnly)break;
         await sleep(this.pollMs);
       }while(Date.now()<deadline&&!this.stopped);
       throw new AdapterError('STICKER_DELIVERY_UNCONFIRMED',{attempted:true,delivery_id:deliveryId??''});
@@ -289,9 +291,11 @@ export class HookOneBot {
         if (!/^\d+$/.test(target) || !this.allowed(kind, target)) fail('CONVERSATION_NOT_ALLOWED');
         const deliveryId=params.wechatagent_delivery_id;
         if(deliveryId!==undefined&&!/^[a-f0-9]{64}$/.test(deliveryId))fail('INVALID_DELIVERY_ID');
+        if(params.wechatagent_receipt_only!==undefined&&typeof params.wechatagent_receipt_only!=='boolean')fail('INVALID_RECEIPT_QUERY');
+        if(params.wechatagent_receipt_only===true&&(!deliveryId||!Array.isArray(params.message)||params.message.length!==1||params.message[0]?.type!=='wechat_sticker'))fail('INVALID_RECEIPT_QUERY');
         if(Array.isArray(params.message)&&params.message.length===1&&params.message[0]?.type==='wechat_sticker'){
           if(params.wechatagent_source!==undefined)fail('PROACTIVE_TEXT_ONLY');
-          data=await this.sendSticker(kind,target,String(params.message[0].data?.id??''),deliveryId);
+          data=await this.sendSticker(kind,target,String(params.message[0].data?.id??''),deliveryId,params.wechatagent_receipt_only===true);
         }else{
           const text=textSegments(params.message);
           if(params.wechatagent_source!==undefined&&params.wechatagent_source!=='proactive')fail('INVALID_SEND_SOURCE');
@@ -349,7 +353,7 @@ export class HookOneBot {
       message_type: kind, sub_type: group ? 'normal' : 'friend', message_id: payload.rawid,
       user_id: userId, message: segments, raw_message: content,
       sender: { user_id: userId, nickname: payload.sourceName || payload.senderName || String(userId) },
-      ...(payload.type===PAT_TYPE?{wechatagent:{interaction:'pat'}}:forwardedRecord?{wechatagent:{forwardedRecord}}:quoteReply?{wechatagent:{quoteReply}}:{}),
+      ...(group||payload.type===PAT_TYPE||forwardedRecord||quoteReply?{wechatagent:{...(group?{memberId:crypto.createHash('sha256').update('wechat-member:'+payload.talkerId).digest('hex')}:{}),...(payload.type===PAT_TYPE?{interaction:'pat'}:forwardedRecord?{forwardedRecord}:quoteReply?{quoteReply}:{})}}:{}),
       ...(group ? { group_id: target, group_name: payload.groupName || String(target) } : {}) };
   }
   enqueue(payload) {

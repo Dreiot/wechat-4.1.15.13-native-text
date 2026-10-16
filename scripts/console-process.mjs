@@ -44,6 +44,7 @@ export function runConsoleCommand(spec, onOutput, { cwd, env = process.env, time
 }
 
 export function taskFailureMessage(output, code) {
+  if (/READER_PORT_UNAVAILABLE/.test(output)) return '读取服务端口已被占用或被 Windows 拒绝。请在连接设置中修改微信读取端口，再启动服务；端口可能被未监听的其他程序占用。';
   if (/port is used by another installation|port is already in use|EADDRINUSE|address already in use/i.test(output)) return '配置端口已被占用。点击“检查占用进程”，核对程序后可选择停止，再重试。';
   if (/Another desktop WeChat is running|WECHAT_MULTIPLE/i.test(output)) return '检测到其他微信客户端。点击“检查占用进程”，确认并停止对应微信后，再打开匹配微信。';
   if (/HOOK_INITIALIZATION_TIMEOUT|HOOK_NOT_LISTENING/.test(output)) return '微信发送组件未能完成初始化。请使用“打开微信”启动匹配客户端；查看 hook-init.log，确认模块等待是否超时或端口绑定失败。';

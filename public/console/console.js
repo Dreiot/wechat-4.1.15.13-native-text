@@ -310,10 +310,29 @@ function paintReaderSetup() {
   if ($('#reader-progress')) $('#reader-progress').textContent = state.readerScanning ? '正在查找本机微信账号…' : state.readerConnecting ? state.job?.output?.trim().split('\n').at(-1) || '正在连接微信…' : state.reader?.verified && !readerDirty() ? '数据库已验证并安全保存，可以继续启动服务。' : '';
   if ($('#reader-save-error')) $('#reader-save-error').textContent = state.readerError || '';
 }
+function pluginPathField() {
+  return `<div class="field full space-top"><label for="plugin-path">DSH 插件目录</label><div class="input-with-button"><input id="plugin-path" value="${escapeHtml(state.deployment?.pluginPath ?? '')}" readonly aria-describedby="plugin-path-help" placeholder="暂时无法获取目录，请刷新后重试"><button class="button" id="copy-plugin-path">复制插件路径</button></div><small id="plugin-path-help">如果在 DSH 中误移除了本项目插件，可在插件页面重新添加此目录，启用后从托盘完整退出并重新打开 DSH。</small></div>`;
+}
+async function copyPluginPath(button) {
+  button.disabled = true;
+  try {
+    if (window.desktop?.copyPluginPath) await window.desktop.copyPluginPath();
+    else {
+      const value = $('#plugin-path')?.value;
+      if (!value) throw new Error('插件目录尚未加载');
+      await navigator.clipboard.writeText(value);
+    }
+    toast('插件路径已复制。');
+  } catch {
+    const input = $('#plugin-path');
+    if (input?.value) { input.focus(); input.select(); toast('自动复制失败，已选中插件路径，请按 Ctrl+C 手动复制。'); }
+    else toast('插件目录尚未加载，请刷新页面后重试。');
+  } finally { button.disabled = false; }
+}
 function connectionsPage() {
   const r = state.reader;
   state.readerDraft ??= { dbPath: r?.dbPath ?? '', myWxid: r?.myWxid ?? '', decryptKey: '' };
-  return `<div class="section-stack"><section class="card">${header('模型连接', '使用你已在 DSH 中配置的模型。', '', 'plug')}<div class="form-grid">${field('DSH 程序位置', 'runtime.dshDesktop', { full: true, browse: 'exe', placeholder: '选择 DeepSeek Harness.exe', help: '启动时若 DSH 尚未打开，会尝试打开这个程序。' })}${field('模型提供方标识', 'dsh.provider', { help: '与 DSH 中的 provider 标识一致。' })}${field('模型标识', 'dsh.model', { help: '图片理解需要当前模型支持图片输入。' })}</div><div class="notice plain">${icon('info')}<span>修改模型后：保存设置 → 在工具页准备配置 → 从托盘完全退出并重新打开 DSH → 重启服务。</span></div></section>
+  return `<div class="section-stack"><section class="card">${header('模型连接', '使用你已在 DSH 中配置的模型。', '', 'plug')}<div class="form-grid">${field('DSH 程序位置', 'runtime.dshDesktop', { full: true, browse: 'exe', placeholder: '选择 DeepSeek Harness.exe', help: '启动时若 DSH 尚未打开，会尝试打开这个程序。' })}${field('模型提供方标识', 'dsh.provider', { help: '与 DSH 中的 provider 标识一致。' })}${field('模型标识', 'dsh.model', { help: '图片理解需要当前模型支持图片输入。' })}</div>${pluginPathField()}<div class="notice plain">${icon('info')}<span>修改模型后：保存设置 → 在工具页准备配置 → 从托盘完全退出并重新打开 DSH → 重启服务。</span></div></section>
     <section class="card">${header('微信与读取程序', '选择本机已准备的程序。', '', 'chat')}<div class="form-grid">${field('匹配微信程序位置', 'hook.wechatExecutable', { full: true, browse: 'exe', help: '当前发送后端固定匹配 4.1.10.27。选择程序不会改变兼容版本。' })}${field('Python 程序位置', 'runtime.python', { full: true, browse: 'exe', help: '选择已有环境的 python.exe，也可填写可用的 Python 命令。' })}</div></section>
     ${readerConfigurationCard()}
     <section class="card">${header('高级连接选项', '通常无需修改。端口需要互不重复。', '', 'sliders')}<details><summary>展开端口与发送超时设置</summary><div class="form-grid">${field('读取服务端口', 'ports.weflow', { type: 'number', min: 1024, max: 65535 })}${field('消息桥接端口', 'ports.onebot', { type: 'number', min: 1024, max: 65535 })}${field('适配器状态端口', 'ports.adapter', { type: 'number', min: 1024, max: 65535 })}${field('DSH 插件端口', 'ports.dshPlugin', { type: 'number', min: 1024, max: 65535 })}${field('发送后端地址', 'hook.baseUrl', { full: true, help: '必须为本机回环 HTTP 地址，例如 http://127.0.0.1:30001。' })}${field('发送请求超时 / 秒', 'hook.requestTimeoutMs', { type: 'number', transform: 'seconds', min: 1, max: 5, step: .1 })}${field('回执等待超时 / 秒', 'hook.receiptTimeoutMs', { type: 'number', transform: 'seconds', min: 1, max: 18, step: .1 })}${field('并发发送上限', 'hook.maxConcurrentSends', { type: 'number', min: 1, max: 4, step: 1 })}</div></details></section></div>`;
@@ -326,7 +345,7 @@ function setupPage() {
   return `<div class="section-stack"><div class="notice plain">${icon('shield')}<span>此安装包使用独立的本机数据目录。账号、读取凭据和聊天范围需要由你配置，初始聊天范围为空。</span></div><div class="tool-grid">
     <section class="card">${header('检查运行环境', 'Node.js、Python 和读取依赖均已内置。', '', 'check')}<p class="modal-description">不需要安装开发工具或系统 Python。可先检查安装文件是否完整。</p><button class="button" data-action="setup">验证内置环境</button></section>
     <section class="card">${header('登录匹配微信', '使用安装包准备的独立匹配客户端。', '', 'chat')}<p class="modal-description">打开微信并登录自己的账号，等待消息同步。目前发送组件适配 4.1.10.27；如果微信要求升级，请保留提示并检查兼容性。</p><button class="button" data-action="wechat-open">打开微信</button></section>
-    <section class="card">${header('连接 DSH', '登录你自己的模型账号，添加本机插件。', '', 'plug')}<p class="modal-description">打开 DSH，在插件页面添加本应用的插件目录。添加并启用后，从托盘完整退出并重新打开 DSH。</p><div class="button-row"><button class="button" data-action="dsh-open">打开 DSH</button><button class="button" id="copy-plugin-path">复制插件路径</button><button class="button" id="open-plugin-folder">打开插件目录</button></div></section>
+    <section class="card">${header('连接 DSH', '登录你自己的模型账号，添加本机插件。', '', 'plug')}<p class="modal-description">打开 DSH，在插件页面添加本应用的插件目录。添加并启用后，从托盘完整退出并重新打开 DSH。</p>${pluginPathField()}<div class="button-row space-top"><button class="button" data-action="dsh-open">打开 DSH</button><button class="button" id="open-plugin-folder">打开插件目录</button></div></section>
     </div>${readerConfigurationCard()}<section class="card">${header('启动并选择聊天范围', '数据库显示“已验证”并完成模型连接后，启动服务。', '', 'power')}<p class="modal-description">启动后，在“聊天范围”搜索自己的好友或群聊。添加后保存并重启，助手只会处理允许的聊天。</p><div class="button-row"><button class="button primary" data-action="start">启动服务</button><a class="button" href="#chats">选择聊天范围</a><a class="button" href="#overview">查看连接状态</a></div></section></div>`;
 }
 async function sessionsPage() {
@@ -576,7 +595,7 @@ document.addEventListener('click', event => {
   if (button.id === 'save-reader') return saveReader();
   if (button.id === 'detect-reader') return discoverReader(true);
   if (button.id === 'scan-reader') return discoverReader(false);
-  if (button.id === 'copy-plugin-path') { window.desktop?.copyPluginPath().then(() => toast('插件路径已复制。')).catch(() => toast('复制失败，请打开插件目录。')); return; }
+  if (button.id === 'copy-plugin-path') return copyPluginPath(button);
   if (button.id === 'open-plugin-folder') { window.desktop?.openPluginFolder().catch(() => toast('无法打开插件目录。')); return; }
   if (['retry-page', 'reload-log'].includes(button.id)) return renderPage();
   if (button.id === 'export-log') {
@@ -618,7 +637,7 @@ if (window.desktop) {
   document.body.classList.add('desktop-mode');
   $('.brand span').textContent = '桌面应用';
   $('.breadcrumb > span:first-of-type').textContent = 'WeChatAgent';
-  $('.version').textContent = '0.3.5 · 关闭窗口收起到托盘';
+  $('.version').textContent = '0.3.6 · 关闭窗口收起到托盘';
   $('#quit-console').textContent = '退出应用';
 }
 document.addEventListener('click', event => { if (document.body.classList.contains('nav-open') && !event.target.closest('.sidebar') && !event.target.closest('#menu-button')) {document.body.classList.remove('nav-open');paintNavigation();} });

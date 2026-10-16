@@ -78,6 +78,10 @@
     "chatModes": {},
     "dshAccess": {
       "chats": {}
+    },
+    "memberMemory": {
+      "enabled": true,
+      "chats": {}
     }
   },
   "persona": {

@@ -4,7 +4,7 @@ export const UPDATE_REPOSITORY='sourcepro5/WeChatAgent';
 const releaseRoot='https://github.com/'+UPDATE_REPOSITORY+'/releases/';
 const version=value=>/^(?:v)?(\d+)\.(\d+)\.(\d+)$/.exec(String(value??''))?.slice(1).map(Number);
 export function compareVersions(a,b){const left=version(a),right=version(b);if(!left||!right)throw Error('INVALID_VERSION');for(let i=0;i<3;i++)if(left[i]!==right[i])return left[i]>right[i]?1:-1;return 0;}
-function metadata(root){for(const file of ['deployment.json','package.json'])try{const data=JSON.parse(fs.readFileSync(path.join(root,file),'utf8'));if(version(data.version))return data;}catch{}return {version:'0.3.5'};}
+function metadata(root){for(const file of ['deployment.json','package.json'])try{const data=JSON.parse(fs.readFileSync(path.join(root,file),'utf8'));if(version(data.version))return data;}catch{}return {version:'0.3.6'};}
 async function jsonResponse(response){let size=0,text='';if(!response.body)return response.json();for await(const chunk of response.body){size+=chunk.length;if(size>128*1024){await response.body.cancel?.().catch(()=>{});throw Error('UPDATE_RESPONSE_TOO_LARGE');}text+=Buffer.from(chunk).toString('utf8');}return JSON.parse(text);}
 export function createUpdateChecker({root,fetchImpl=fetch,now=Date.now}={}) {
   const local=metadata(root);let cached,inflight,checkedAt=0;

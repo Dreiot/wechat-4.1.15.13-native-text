@@ -4,6 +4,7 @@ Database credentials remain in the existing private configuration. Only the
 selected account and explicitly selected conversations are read for pushes.
 """
 import base64
+import errno
 import ctypes
 import ctypes.wintypes as wintypes
 import hashlib
@@ -32,6 +33,7 @@ from wechat_sticker_send import sticker_send_fields, sticker_receipt_md5, APPMSG
 from wechat_sticker import emoji_attributes, resolve_sticker_bytes, sticker_image_xml, NoRedirect
 from wechat_sticker_labels import StickerLabels, clean_label
 from wechat_sticker_collection import StickerCollection
+from wechat_meme_library import import_library_sticker,inspect_library_sticker
 
 PAT_TYPE = (62 << 32) | 49
 
@@ -350,6 +352,10 @@ class Reader:
         return image_id
 
     def resolve_image(self, image_id):
+        prepared=getattr(self,'meme_send_resources',None)
+        if prepared:
+            preview=prepared.preview(image_id)
+            if preview:return preview
         library=getattr(self,'sticker_collection',None)
         if library:
             try:preview=library.preview(image_id)
@@ -456,6 +462,10 @@ class Reader:
         return read_json(self.root/'config/wechatagent.json').get('wechat',{}).get('stickers',{}).get('labelCache',True) is True
 
     def sticker_source(self,image_id,key):
+        prepared=getattr(self,'meme_send_resources',None)
+        if prepared:
+            resource=prepared.resource(image_id,key)
+            if resource:return resource['sourceMd5']
         collected=getattr(self,'sticker_collection',None)
         if collected:
             try:resource=collected.resource(image_id,key)
@@ -488,6 +498,10 @@ class Reader:
         return {'saved':len(updates)}
 
     def resolve_sticker(self, image_id, key):
+        prepared=getattr(self,'meme_send_resources',None)
+        if prepared:
+            resource=prepared.resource(image_id,key)
+            if resource:return resource
         collected=getattr(self,'sticker_collection',None)
         if collected:
             try:resource=collected.resource(image_id,key)
@@ -709,6 +723,17 @@ class Reader:
         return True
 
 
+def create_reader_server(port, handler, server_factory=None):
+    """A bound client socket may deny access without appearing as a listener."""
+    try:
+        return (server_factory or ThreadingHTTPServer)(('127.0.0.1', port), handler)
+    except OSError as error:
+        code = getattr(error, 'winerror', None) or error.errno
+        if code in (10013, 10048, errno.EACCES, errno.EADDRINUSE):
+            raise RuntimeError(f'READER_PORT_UNAVAILABLE port={port} code={code}') from None
+        raise
+
+
 def serve(reader, port, token):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
@@ -798,6 +823,16 @@ def serve(reader, port, token):
             if not token or not hmac.compare_digest(supplied, token):
                 self.respond({'success': False, 'error': 'Unauthorized'}, 401)
                 return
+            if self.path in ('/api/v1/stickers/import','/api/v1/stickers/inspect'):
+                try:
+                    size=int(self.headers.get('Content-Length','0'))
+                    if not 0<size<=11300000:raise ValueError()
+                    body=json.loads(self.rfile.read(size))
+                    self.respond(inspect_library_sticker(reader,body) if self.path.endswith('/inspect') else import_library_sticker(reader,body))
+                except PermissionError:self.respond({'error':'Meme import is not allowed'},403)
+                except ValueError:self.respond({'error':'Invalid meme image'},400)
+                except Exception:self.respond({'error':'Meme import unavailable'},503)
+                return
             if self.path == '/api/v1/stickers/labels':
                 try:
                     size=int(self.headers.get('Content-Length','0'))
@@ -836,7 +871,7 @@ def serve(reader, port, token):
                 code = str(error) if isinstance(error, RuntimeError) and re.fullmatch(r'IMAGE_[A-Z_]{3,80}', str(error)) else 'IMAGE_RETRY_FAILED'
                 self.respond({'success': False, 'error': code}, 503)
 
-    server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    server = create_reader_server(port, Handler)
     threading.Thread(target=reader.poll, daemon=True).start()
     print('Independent reader ready; database and contacts verified.', flush=True)
     try:

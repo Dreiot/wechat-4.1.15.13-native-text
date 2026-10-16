@@ -3,7 +3,6 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {buildConversationKey,parseConversationKey} from './conversation-key.js';
 import {SOCIAL_OUTPUT_NOTICE,resolveSocialDecision,hasStickerControl,hasReasoningControl} from './decision-format.js';
-import {CHAT_POLICY_NOTICE,CHAT_COHERENCE_NOTICE} from './chat-policy.js';
 import {proactivePolicy,proactivePolicyKey,withinProactiveWindow,nextProactiveAt,conversationSnapshot,declinedProactive} from './proactive-policy.js';
 
 const hash=value=>crypto.createHash('sha256').update(value).digest('hex');
@@ -18,8 +17,7 @@ export function buildProactivePrompt({key,rows,mode,now,searchStatus,recentTopic
     '热点或新梗不适合你的兴趣、世界观、知识背景时，改为符合人格的轻问候，或沉默；不要强迫自己追梗，不反复问同一句话。尊重对方不想被打扰的表达。本轮只发文字，不使用历史表情编号。\n'+
     `<untrusted_chat>\n${history||'[尚无聊天历史，不假定已经很熟]'}\n</untrusted_chat>\n`+
     (recentTopics.length?'最近主动说过的内容（历史资料，避免重复）：\n'+recentTopics.slice(-6).map(item=>quote(item.text.slice(0,180))).join('\n')+'\n':'')+
-    (mode==='greeting'?'本轮不需要联网。':searchStatus==='model'?'本轮可根据会话话题调用现有联网搜索工具，先检索再按证据决定是否发言；无需固定泛热点查询，也不要求对方给网址。没有可靠资料时不编造热点或实时数值。':searchStatus==='ready'?'本轮附有有界搜索摘要。只说摘要支持的事实；来源不足不编造“最新”“全网热度”或梗出处，可带一个相关来源链接。':'本轮没有可用的新搜索资料，不得编造实时热点或新梗；可自然问候或沉默。')+'\n'+
-    CHAT_POLICY_NOTICE+'\n'+CHAT_COHERENCE_NOTICE+'\n'+SOCIAL_OUTPUT_NOTICE;
+    (mode==='greeting'?'本轮不需要联网。':searchStatus==='model'?'本轮可根据会话话题调用现有联网搜索工具，先检索再按证据决定是否发言；无需固定泛热点查询，也不要求对方给网址。没有可靠资料时不编造热点或实时数值。':searchStatus==='ready'?'本轮附有有界搜索摘要。只说摘要支持的事实；来源不足不编造“最新”“全网热度”或梗出处，可带一个相关来源链接。':'本轮没有可用的新搜索资料，不得编造实时热点或新梗；可自然问候或沉默。');
 }
 export class ProactiveEngine {
   constructor({stateFile,buffer,social,settingsFor,personaFor,decide,send,searchFor=async()=>null,isReady=()=>true,selfIdFor=()=>'',
@@ -95,8 +93,9 @@ export class ProactiveEngine {
       const prompt=buildProactivePrompt({key,rows,mode:job.mode,now:this.now(),searchStatus:search?.status,recentTopics:item.history})+
         (notice?'\n本机发送状态说明：'+quote(notice.text):'');
       job.noticeId=notice?.id;
+      metadata.memeLibraryDisabled=true; // This public scheduler keeps its existing text-only contract.
       let result;
-      try{({result}=await resolveSocialDecision({rawOutput:await this.decide(key,prompt+'\n'+SOCIAL_OUTPUT_NOTICE,metadata),key,metadata,decide:(...args)=>this.decide(...args),log:this.log}));}
+      try{({result}=await resolveSocialDecision({rawOutput:await this.decide(key,prompt,metadata),key,metadata,decide:(...args)=>this.decide(...args),log:this.log}));}
       catch(error){this.notice(key,job.id);item.job=null;this.save();this.log(`[Proactive] ${key} decision_failed`);return;}
       if(result.decision!=='RESPOND'||item.history.some(entry=>entry.text.trim()===result.text.trim()&&this.now()-entry.at<86400000)){
         if(result.decision==='RESPOND')this.notice(key,job.id);

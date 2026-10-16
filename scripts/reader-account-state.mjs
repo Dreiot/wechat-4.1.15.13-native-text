@@ -9,7 +9,7 @@ const write = (file, value) => {
   fs.writeFileSync(temp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 }); fs.renameSync(temp, file);
 };
 const stateFiles = ['social-messages.json', 'sticker-delivery-pending.json', 'text-deliveries', 'proactive', 'search', 'media'];
-const chatFeatures = ['stickers', 'search', 'proactive', 'context'];
+const chatFeatures = ['stickers', 'search', 'proactive', 'context', 'memeLibrary', 'memberMemory'];
 const protectedKey = key => typeof key === 'string' && /^userdpapi:[A-Za-z0-9+/=]+$/.test(key);
 
 export function readerAccountId(root, settings) {

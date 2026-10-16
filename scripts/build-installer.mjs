@@ -53,12 +53,13 @@ for (const name of ['package.json','main.cjs','preload.cjs','desktop-policy.cjs'
 fs.writeFileSync(path.join(appDir, 'package.json'), JSON.stringify({ name: 'wechatagent', productName: 'WeChatAgent', version, description: 'WeChatAgent desktop console', main: 'main.cjs', author: 'WeChatAgent contributors', license: 'SEE THIRD-PARTY-NOTICES.txt' }, null, 2));
 await buildIcons(root, appDir, require('sharp'));
 for (const name of ['LICENSE','LICENSES.md']) add(name);
+for (const name of ['README.md','RELEASE_NOTES.md','docs/DSH_MEME.md','docs/MEMBER_MEMORY.md','docs/DSH_CHAT_ACCESS.md','docs/STICKER_COLLECTION.md','docs/INSTALLER_RELEASE.md']) add(name);
 add('config/wechatagent.example.json');
 const presetNames = fs.readdirSync(path.join(root, 'roles')).filter(name => name.endsWith('.md') && name !== 'README.md');
 for (const name of presetNames) add('roles/' + name);
 addTree('public/console');
 const scriptNames = ['project-config.mjs','extension-status.mjs','bundled-extensions.mjs','update-check.mjs','migrate-io-config.mjs','manage.ps1','console-server.mjs','console-process.mjs','console-powershell.ps1','console-native.ps1','sync-weflow.cjs','hook-onebot.mjs','reader-api.py','reader-requirements.txt','wechat_media.py','wechat_sticker.py','wechat_sticker_send.py','wechat_forwarded.py','resolve-wechat-image.py','list-friend-ids.mjs','manage-dsh-sessions.mjs','launch-hook-wechat.ps1','pin-hook-client.ps1','launch-dsh.ps1','check-runtime.ps1','setup.ps1','build-hook.ps1'];
-for (const name of [...scriptNames, 'dsh-configuration.mjs', 'process-recovery.mjs', 'process-recovery.ps1', 'check-runtime.py', 'wechat_sticker_labels.py', 'wechat_image_normalize.py', 'wechat_sticker_collection.py', 'wechat_quote.py', 'text-delivery-store.mjs', 'reader-setup.mjs', 'reader_setup.py', 'reader-account-state.mjs']) add('scripts/' + name);
+for (const name of [...scriptNames, 'dsh-configuration.mjs', 'process-recovery.mjs', 'process-recovery.ps1', 'check-runtime.py', 'wechat_meme_library.py', 'wechat_sticker_labels.py', 'wechat_image_normalize.py', 'wechat_sticker_collection.py', 'wechat_quote.py', 'text-delivery-store.mjs', 'reader-setup.mjs', 'reader_setup.py', 'reader-account-state.mjs']) add('scripts/' + name);
 addTree('scripts/native-hook');
 for (const name of ['nt_decrypt.py','nt_common.py']) add('components/weflow-cli/scripts/' + name);
 add('components/weflow-cli/LICENSE');

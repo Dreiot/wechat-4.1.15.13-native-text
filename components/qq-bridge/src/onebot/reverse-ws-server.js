@@ -128,7 +128,8 @@ export class ReverseOneBotServer extends EventEmitter {
   }
 
   async stop() {
-    this.socket?.end(frame(8)); this.socket?.destroy();
+    if(this.socket&&!this.socket.destroyed&&!this.socket.writableEnded)this.socket.end(frame(8));
+    this.socket?.destroy();
     if (this.server) await new Promise((resolve) => this.server.close(resolve));
     this.server = null;
   }

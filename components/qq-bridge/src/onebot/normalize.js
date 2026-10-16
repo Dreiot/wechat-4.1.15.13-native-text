@@ -25,6 +25,7 @@ export function normalizeOneBotEvent(platform, adapter, event) {
     platform, adapter, kind, conversation_id: conversationId, sender_id: senderId,
     conversation_name: String(kind === 'group' ? event.group_name ?? conversationId : event.sender?.nickname ?? conversationId),
     sender_name: String(event.sender?.card ?? event.sender?.nickname ?? senderId),
+    ...(platform==='wechat'&&kind==='group'&&/^[a-f0-9]{64}$/.test(event.wechatagent?.memberId??'')?{sender_key:event.wechatagent.memberId}:{}),
     self_id: String(event.self_id ?? ''), message_id: String(event.message_id ?? `local-${fingerprint}`),
     message_type: messageType ?? 'unknown', text: text || (images.length ? '[图片]' : ''), images, timestamp, segments, raw: event,
     ...(platform==='wechat' && event.wechatagent?.interaction==='pat'?{interaction:'pat'}:{}),

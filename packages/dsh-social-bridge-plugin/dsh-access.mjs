@@ -1,7 +1,7 @@
 import fs from 'node:fs';import path from 'node:path';
 import {conversationAccess} from './conversation-policy.mjs';
 export const DSH_ACCESS_POLICY=Symbol.for('wechatagent.dsh-access.v1');
-const reserved=new Set(['skill','web_search','web_reader_read','run_code']);
+const reserved=new Set(['skill','web_search','web_reader_read','run_code','send_meme','learn_meme','wechat_member_memory_read','wechat_member_memory_update']);
 const controlTool=/^(?:bash|shell|pwsh|powershell|terminal|exec_command|apply_patch|file|read_file|write_file|edit_file|agent|task|config|plugin|session|schedule|automation)(?:$|[_.:-])/i;
 export const assignableTool=name=>typeof name==='string'&&!reserved.has(name)&&!controlTool.test(name)&&/^[\w.:-]{1,120}$/.test(name);
 const esc=text=>String(text??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');

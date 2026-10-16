@@ -1,6 +1,6 @@
 {
   "project": "WeChatAgent",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "distribution": "source-only",
   "components": [
     {

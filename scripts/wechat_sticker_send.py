@@ -24,6 +24,19 @@ def stage_sticker_resource(root,resource):
     with source.open('rb') as stream:raw=stream.read(8*1024*1024+1)
     if not raw.startswith((b'GIF87a',b'GIF89a')) or hashlib.md5(raw).hexdigest()!=md5 or type(fields.get('len')) is not int or len(raw)!=fields['len']:
         raise RuntimeError('STICKER_CACHE_INTEGRITY_FAILED')
+    return stage_sticker_bytes(root,resource,raw)
+
+
+def stage_sticker_bytes(root,resource,raw):
+    """Stage validated short-lived material with the same native path guard."""
+    root=pathlib.Path(root).resolve();scope=(root/'state/stickers').resolve()
+    fields=resource.get('fields',{});md5=fields.get('md5','')
+    if not scope.is_relative_to(root) or resource.get('format')!='gif' or not re.fullmatch('[a-f0-9]{32}',md5):
+        raise RuntimeError('STICKER_CACHE_PATH_INVALID')
+    if not isinstance(raw,bytes) or not 0<len(raw)<=8*1024*1024 or not raw.startswith((b'GIF87a',b'GIF89a')) or hashlib.md5(raw).hexdigest()!=md5 or type(fields.get('len')) is not int or len(raw)!=fields['len']:
+        raise RuntimeError('STICKER_CACHE_INTEGRITY_FAILED')
+    if 'sha256' in resource and hashlib.sha256(raw).hexdigest()!=resource['sha256']:
+        raise RuntimeError('STICKER_CACHE_INTEGRITY_FAILED')
     folder=root/'state/stickers/outgoing'
     if folder.is_symlink() or not folder.resolve().is_relative_to(scope):
         raise RuntimeError('STICKER_CACHE_PATH_INVALID')

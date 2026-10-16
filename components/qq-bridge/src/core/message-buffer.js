@@ -4,6 +4,23 @@ import crypto from 'node:crypto';
 import { buildConversationKey } from './conversation-key.js';
 import { normalizeForwardedRecord, normalizeQuoteReply } from './wechat-events.js';
 
+export function replyDeliveryParts(result,deliveryId) {
+  const parts=result.decision==='RESPOND'?(result.textParts??[result.text]).map(text=>({text})):[];
+  if(result.stickerId)parts.push({stickerId:result.stickerId});
+  return parts.map((part,index)=>({...part,deliveryId:index===0?deliveryId:crypto.createHash('sha256').update(deliveryId+(part.stickerId?'\0sticker':'\0text-2')).digest('hex'),state:'queued'}));
+}
+function validReplyParts(item){
+  if(item.parts===undefined)return true;
+  const expected=replyDeliveryParts(item.result,item.deliveryId);
+  return Array.isArray(item.parts)&&item.parts.length===expected.length&&item.parts.length<=3&&item.parts.every((part,index)=>{
+    const target=expected[index];
+    return part&&part.text===target.text&&part.stickerId===target.stickerId&&part.deliveryId===target.deliveryId&&
+      ['queued','sending','submitted','confirmed','unconfirmed','failed','cancelled','expired'].includes(part.state)&&
+      ['busyAttempts','receiptChecks'].every(name=>part[name]===undefined||Number.isSafeInteger(part[name])&&part[name]>=0&&part[name]<=10)&&
+      ['retryAt','busyDeadline'].every(name=>part[name]===undefined||Number.isSafeInteger(part[name])&&part[name]>=0);
+  })&&(item.deliveryNotice===undefined||typeof item.deliveryNotice==='string'&&item.deliveryNotice.length<=1000);
+}
+
 /** Small persistent recent-message buffer. Corrupt files fail closed and are never overwritten. */
 export class MessageBuffer {
   constructor(file, { maxPerChat = 300 } = {}) {
@@ -23,7 +40,9 @@ export class MessageBuffer {
         if(!item||!/^[a-f0-9]{64}$/.test(item.deliveryId??'')||typeof item.throughId!=='string'||
           !['RESPOND','STICKER'].includes(item.result?.decision)||
           item.result.decision==='RESPOND'&&(typeof item.result.text!=='string'||!item.result.text.trim()||item.result.text.length>1200)||
+          item.result.textParts!==undefined&&(!Array.isArray(item.result.textParts)||item.result.textParts.length!==2||item.result.textParts.some(part=>typeof part!=='string'||!part.trim())||item.result.textParts.join('\n\n')!==item.result.text)||
           item.result.decision==='STICKER'&&!/^[a-f0-9]{64}$/.test(item.result.stickerId??'')||!item.message||
+          item.result.stickerId!==undefined&&!/^[a-f0-9]{64}$/.test(item.result.stickerId)||!validReplyParts(item)||
           buildConversationKey(item.message.platform,item.message.kind,item.message.conversation_id)!==key)throw Error('invalid reply outbox');
         this.pendingReplies.set(key,item);
       }
@@ -41,6 +60,7 @@ export class MessageBuffer {
       conversation_id: String(message.conversation_id), sender_id: String(message.sender_id ?? ''),
       conversation_name: String(message.conversation_name ?? message.conversation_id),
       sender_name: String(message.sender_name ?? ''), message_id: String(message.message_id ?? ''),
+      ...(!outgoing&&message.kind==='group'&&/^[a-f0-9]{64}$/.test(message.sender_key??'')?{sender_key:message.sender_key}:{}),
       self_id:String(message.self_id??''),
       text: String(message.text ?? '').slice(0, 4000), timestamp: Number(message.timestamp) || Date.now() / 1000,
       images: outgoing ? [] : (message.images ?? []).filter(image => /^[a-f0-9]{64}$/.test(image?.id ?? '')).slice(0,4),
@@ -72,14 +92,25 @@ export class MessageBuffer {
   }
   forgetReply(key){this.pendingReplies.delete(key);this.#save();}
   setContextNotice(key,item){this.contextNotices.set(key,item);this.#save();}
-  completeReply(key,item,outgoing){
+  recordReplyPart(key,item,outgoing){
     const rows=this.chats.get(key)??[];
-    if(outgoing&&!rows.some(row=>row.outgoing&&row.delivery_id===item.deliveryId)){
+    const existing=rows.find(row=>row.outgoing&&row.delivery_id===item.deliveryId);
+    if(outgoing&&existing?.delivery_status==='unconfirmed'&&outgoing.delivery_status==='confirmed'){
+      existing.delivery_status='confirmed';existing.text=String(outgoing.text).slice(0,4000);
+    }
+    if(outgoing&&!existing){
       rows.push({id:crypto.randomUUID(),platform:outgoing.platform,kind:outgoing.kind,conversation_id:String(outgoing.conversation_id),
         conversation_name:String(outgoing.conversation_name??''),sender_id:String(outgoing.sender_id??''),sender_name:'AI',
         message_id:'out-'+item.deliveryId,text:String(outgoing.text).slice(0,4000),timestamp:outgoing.timestamp,
-        images:[],direct_mention:false,outgoing:true,processed:true,delivery_id:item.deliveryId,delivery_status:outgoing.delivery_status,proactive:outgoing.proactive===true});
+        images:[],direct_mention:false,outgoing:true,processed:true,delivery_id:item.deliveryId,delivery_status:outgoing.delivery_status,proactive:outgoing.proactive===true,
+        ...(/^[a-f0-9]{64}$/.test(outgoing.sticker_id??'')?{sticker_id:outgoing.sticker_id}:{})});
     }
+    if(rows.length>this.maxPerChat)rows.splice(0,rows.length-this.maxPerChat);
+    this.chats.set(key,rows);this.#save();
+  }
+  completeReply(key,item,outgoing){
+    if(outgoing)this.recordReplyPart(key,item,outgoing);
+    const rows=this.chats.get(key)??[];
     if(rows.some(row=>row.id===item.throughId))for(const row of rows){row.processed=true;if(row.id===item.throughId)break;}
     if(rows.length>this.maxPerChat)rows.splice(0,rows.length-this.maxPerChat);
     this.chats.set(key,rows);this.pendingReplies.delete(key);

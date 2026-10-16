@@ -102,8 +102,10 @@ class StickerCollection:
             state=self.read()
             if image_id in state['pending']:del state['pending'][image_id];self.write(state)
 
-    def store(self,raw,fields,source_md5,key,received_at,image_id):
-        if not self.can_collect(key):return False
+    def store(self,raw,fields,source_md5,key,received_at,image_id,external=False):
+        from wechat_meme_library import meme_import_allowed
+        can_store=lambda:self.active() and meme_import_allowed(self.policy(),key) if external else self.can_collect(key)
+        if not can_store():return False
         if not isinstance(raw,bytes) or not 0<len(raw)<=MAX_FILE or not raw.startswith((b'GIF87a',b'GIF89a')) or not valid_md5(source_md5):raise RuntimeError('STICKER_COLLECTION_RESOURCE_INVALID')
         with Image.open(io.BytesIO(raw)) as image:
             if image.format!='GIF' or not 0<image.width<=4096 or not 0<image.height<=4096:raise RuntimeError('STICKER_COLLECTION_RESOURCE_INVALID')
@@ -115,7 +117,7 @@ class StickerCollection:
             old=state['entries'].get(digest,state['waiting'].get(digest,state['archive'].get(digest,{})))
             item={'fields':fields,'sourceMd5':old.get('sourceMd5',source_md5),'sourceMd5s':list(dict.fromkeys([source_md5,*old.get('sourceMd5s',[old.get('sourceMd5',source_md5)])]))[:8],
                   'receivedAt':max(int(received_at),old.get('receivedAt',0)),'sources':dict(sorted({**old.get('sources',{}),key:int(received_at)}.items(),key=lambda pair:pair[1],reverse=True)[:100]),'animated':animated}
-            if not self.can_collect(key):return False
+            if not can_store():return False
             self.safe(self.folder).mkdir(parents=True,exist_ok=True);file=self.safe(self.folder/(digest+'.gif'))
             if file.exists() and file.read_bytes()!=raw:raise RuntimeError('STICKER_COLLECTION_INTEGRITY_FAILED')
             if not file.exists():

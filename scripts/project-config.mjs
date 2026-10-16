@@ -9,6 +9,8 @@ import { validateSearchSettings } from '../packages/dsh-social-bridge-plugin/sea
 import {validateProactiveSettings} from '../components/qq-bridge/src/core/proactive-policy.js';
 import { validateContextSettings } from '../packages/dsh-social-bridge-plugin/context-policy.mjs';
 import { validateWebReaderSettings } from '../packages/dsh-social-bridge-plugin/web-reader-policy.mjs';
+import {validateMemeLibrarySettings} from '../packages/dsh-social-bridge-plugin/meme-library-policy.mjs';
+import {validateMemberMemory} from '../packages/dsh-social-bridge-plugin/member-memory-policy.mjs';
 
 import {validateConversationSettings,conversationMode} from '../packages/dsh-social-bridge-plugin/conversation-policy.mjs';
 import {migrateDshSettings} from '../packages/dsh-social-bridge-plugin/dsh-migration.mjs';
@@ -20,6 +22,8 @@ const write = (file, value) => {
   fs.renameSync(`${file}.tmp`, file);
 };
 export function validateConfig(config) {
+  validateMemberMemory(config.wechat?.memberMemory);
+  validateMemeLibrarySettings(config.wechat?.memeLibrary);
   validateConversationSettings(config.wechat);
   validateStickerSettings(config.wechat?.stickers);
   validateSearchSettings(config.wechat?.search);
@@ -111,10 +115,11 @@ export function prepare(root = projectRoot) {
   if (fs.existsSync(patchFile)) {
     const before = fs.readFileSync(patchFile, 'utf8');
     let after = before.replace(/^(        provider:).*/m, `$1 ${JSON.stringify(config.dsh.provider)}`).replace(/^(        model:).*/m, `$1 ${JSON.stringify(config.dsh.model)}`);
-    const moduleDir=path.dirname(patchFile),sources=['native-context.mjs','conversation-policy.mjs','dsh-access.mjs','dsh-bundled.mjs','sticker-pool-review.mjs','dsh-migration.mjs','web-reader.mjs','web-reader-policy.mjs','web-reader-content.mjs','web-reader-fetch.mjs','web-reader-zxsj.mjs','skills/web-reader/skill.json','skills/web-reader/SKILL.md','model-search.mjs','dsh-search.mjs','search-provider.mjs','skills/search/skill.json','skills/search/SKILL.md','search-budget.mjs','search-policy.mjs','weather-query.mjs','weather-source.mjs','social-tool-policy.mjs','social-tool-restrict.mjs','context-policy.mjs'].map(name=>path.join(moduleDir,name));
+    const moduleDir=path.dirname(patchFile),sources=['prompt-context.mjs','member-memory.mjs','member-memory-policy.mjs','meme-library.mjs','meme-library-policy.mjs','native-context.mjs','conversation-policy.mjs','dsh-access.mjs','dsh-bundled.mjs','sticker-pool-review.mjs','dsh-migration.mjs','web-reader.mjs','web-reader-policy.mjs','web-reader-content.mjs','web-reader-fetch.mjs','web-reader-zxsj.mjs','skills/web-reader/skill.json','skills/web-reader/SKILL.md','model-search.mjs','dsh-search.mjs','search-provider.mjs','skills/search/skill.json','skills/search/SKILL.md','search-budget.mjs','search-policy.mjs','weather-query.mjs','weather-source.mjs','social-tool-policy.mjs','social-tool-restrict.mjs','context-policy.mjs'].map(name=>path.join(moduleDir,name));
     if(sources.every(file=>fs.existsSync(file))){
       const revision=crypto.createHash('sha256').update(Buffer.concat(sources.map(file=>fs.readFileSync(file)))).digest('hex').slice(0,16);
-      const entry=pathToFileURL(sources[0]).href+'?wechatagent='+revision;
+      // Revision inputs may grow or move; the Cordis plugin entry stays fixed.
+      const entry=pathToFileURL(path.join(moduleDir,'native-context.mjs')).href+'?wechatagent='+revision;
       after=after.replace(/(    - id: dsh-social-bridge-plugin\r?\n      name:).*/,'$1 '+JSON.stringify(entry));
     }
     after = /^        port:/m.test(after) ? after.replace(/^        port:.*/m, `        port: ${config.ports.dshPlugin}`) : after.replace(/^(        model:.*)$/m, `$1\n        port: ${config.ports.dshPlugin}`);

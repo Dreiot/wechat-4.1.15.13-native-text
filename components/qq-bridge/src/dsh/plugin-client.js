@@ -44,6 +44,7 @@ export class DshPluginClient {
       const detail = budgetCode?` (${budgetCode})`:typeof body.detail === 'string' && /^[a-zA-Z_]{3,100}$/.test(body.detail) ? ` (${body.detail})` : '';
       throw new Error(`DSH plugin: ${body.error ?? response.status}${detail}`);
     }
+    if(Array.isArray(body.memeChoices))metadata.memeChoices=body.memeChoices.filter(item=>item?.source==='dsh-meme'&&/^[a-f0-9]{64}$/.test(item.id??'')&&typeof item.description==='string'&&item.description.length<=120&&Array.isArray(item.tags)&&item.tags.length<=6&&item.tags.every(tag=>typeof tag==='string'&&tag.length<=16)).slice(0,1);
     return String(body.text ?? '');
   }
 

@@ -306,16 +306,18 @@ export function looksLikeImageBuffer(buf) {
 }
 
 /** 抓取图片字节并返回 Buffer（带 SSRF 防护，且校验确实为图片）。 */
-export async function safeFetchBuffer(urlString, maxBytes = 4 * 1024 * 1024) {
+export async function safeFetchBuffer(urlString, maxBytes = 4 * 1024 * 1024, {signal,timeoutMs=REQUEST_TIMEOUT_MS} = {}) {
   validateLimit(maxBytes, 'maxBytes');
+  const deadline=Date.now()+timeoutMs;
+  const budget=()=>{signal?.throwIfAborted();const remaining=deadline-Date.now();if(remaining<=0)throw Error('FETCH_TIMEOUT');return {signal,timeoutMs:remaining};};
   const MAX_REDIRECTS = 5;
-  let { url, ip } = await validateFetchUrl(urlString);
+  let { url, ip } = await validateFetchUrl(urlString,budget());
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    const result = await requestOnce(url, ip, maxBytes, true);
+    const result = await requestOnce(url, ip, maxBytes, true,budget());
     if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
       if (!result.redirect) throw new Error(`重定向缺少 Location: ${result.statusCode}`);
       const next = new URL(result.redirect, url).toString();
-      ({ url, ip } = await validateFetchUrl(next));
+      ({ url, ip } = await validateFetchUrl(next,budget()));
       continue;
     }
     if (result.statusCode < 200 || result.statusCode >= 300) {

@@ -14,7 +14,7 @@ import { runConsoleCommand, taskFailureMessage, windowsPowerShellEnvironment, wi
 import { personaError } from '../public/console/persona-files.mjs';
 import {applyChatSettings} from '../public/console/conversation-settings.mjs';
 import { runReaderSetup, readerSetupMessage } from './reader-setup.mjs';
-import { dshConfigurationMatches } from './dsh-configuration.mjs';
+import { dshConfigurationMatches,sameProjectPath } from './dsh-configuration.mjs';
 import { createProcessRecovery } from './process-recovery.mjs';
 import { readerAccountId, cachedReaderAccount, applyReaderAccount } from './reader-account-state.mjs';
 
@@ -135,7 +135,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     if (!fs.existsSync(tokenFile)) throw fault('模型连接尚未准备，请先打开 DSH 并启用本项目插件。', 503);
     const token = fs.readFileSync(tokenFile, 'utf8').trim();
     const health = await remote(`http://127.0.0.1:${config.ports.dshPlugin}/health`, token);
-    if (health.project !== 'WeChatAgent' || path.resolve(health.projectRoot ?? '') !== path.resolve(root)) throw fault('DSH 插件连接到其他项目，请启用当前项目插件。', 503);
+    if (health.project !== 'WeChatAgent' || !sameProjectPath(health.projectRoot,root)) throw fault('DSH 插件连接到其他项目，请启用当前项目插件。', 503);
     return remote(`http://127.0.0.1:${config.ports.dshPlugin}${route}`, token, 5000);
   }
   function buffered() {
@@ -162,7 +162,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       const readerState = value(0), adapter = value(2), health = value(3);
       const matchesDsh=dshConfigurationMatches(root,snapshot().config,health);
       if(optionalJson(preferenceFile).dshRestartRequired && matchesDsh)atomic(preferenceFile,{...optionalJson(preferenceFile),dshRestartRequired:false});
-      const dshReady = health?.ok === true && health.project === 'WeChatAgent' && path.resolve(health.projectRoot ?? '') === path.resolve(root) && health.contextMode === 'native-session-v1' && health.behaviorPolicy === 'local-config-only-v1' && health.imageInput === 'native-attachment-v1' && (!optionalJson(preferenceFile).dshRestartRequired || matchesDsh);
+      const dshReady = health?.ok === true && health.project === 'WeChatAgent' && sameProjectPath(health.projectRoot,root) && health.contextMode === 'native-session-v1' && health.behaviorPolicy === 'local-config-only-v1' && health.imageInput === 'native-attachment-v1' && (!optionalJson(preferenceFile).dshRestartRequired || matchesDsh);
       const readerReady = !!readerState && !!value(1) && !readerState.lastError;
       const bridgeReady = !!value(4) && adapter?.ob_connected === true;
       const hookReady = adapter?.hook_connected === true && adapter?.hook_account_verified === true && adapter?.version === config.hook.expectedVersion;
@@ -316,6 +316,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       const route = url.pathname;
       if (req.method === 'GET' && !route.startsWith('/api/')) {
         const assets = { '/': ['index.html', 'text/html; charset=utf-8'], '/index.html': ['index.html', 'text/html; charset=utf-8'], '/console.css': ['console.css', 'text/css; charset=utf-8'], '/console.js': ['console.js', 'text/javascript; charset=utf-8'], '/persona-files.mjs': ['persona-files.mjs', 'text/javascript; charset=utf-8'], '/appearance.js': ['appearance.js', 'text/javascript; charset=utf-8'], '/appearance.css': ['appearance.css', 'text/css; charset=utf-8'], '/icons.svg': ['icons.svg', 'image/svg+xml'], '/app-icon.png': ['app-icon.png', 'image/png'], '/favicon.svg': ['app-icon.png', 'image/png'] };
+        assets['/extension-market.js']=['extension-market.js','text/javascript; charset=utf-8'];assets['/extension-market.css']=['extension-market.css','text/css; charset=utf-8'];
         assets['/external-links.js']=['external-links.js','text/javascript; charset=utf-8'];
         assets['/updates.js']=['updates.js','text/javascript; charset=utf-8'];
         assets['/conversation-settings.mjs']=['conversation-settings.mjs','text/javascript; charset=utf-8'];
@@ -330,11 +331,12 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       if (req.method === 'GET' && route === '/api/config') return reply(200, { ...snapshot(), ...optionalJson(preferenceFile) });
       if(req.method==='GET'&&route==='/api/sticker-pool')return reply(200,await reader('/api/v1/stickers/pool-status'));
       if(req.method==='GET'&&route==='/api/dsh-catalog')return reply(200,await plugin('/dsh-catalog'));
+      if(req.method==='GET'&&route==='/api/meme-library-status'){try{return reply(200,await plugin('/meme-library/status'));}catch{return reply(200,{available:false,installed:false,reason:'DSH_PLUGIN_UNAVAILABLE'});}}
       if(req.method==='GET'&&route==='/api/extensions'){const saved=snapshot();let connected=false;try{connected=!!(await plugin('/health')).ok;}catch{}return reply(200,builtinCatalog(saved.config,saved.revision,connected));}
       if (req.method === 'GET' && route === '/api/deployment') {
         const distribution = optionalJson(path.join(root, 'config', 'distribution.json'));
         const readerSettings = optionalJson(path.join(root, 'state', 'weflow', 'WeFlow-config.json'));
-        return reply(200, { installed: !!distribution.installed, version: distribution.version ?? '0.3.5', configured: !!readerSettings.dbPath && !!readerSettings.myWxid && !!readerSettings.decryptKey && readerVerified(), pluginPath: path.join(root, 'packages', 'dsh-social-bridge-plugin') });
+        return reply(200, { installed: !!distribution.installed, version: distribution.version ?? '0.3.6', configured: !!readerSettings.dbPath && !!readerSettings.myWxid && !!readerSettings.decryptKey && readerVerified(), pluginPath: path.join(root, 'packages', 'dsh-social-bridge-plugin') });
       }
       if (req.method === 'GET' && route === '/api/status') return reply(200, await getStatus());
       if(req.method==='GET' && route==='/api/process-recovery'){
@@ -404,7 +406,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       }
       if(route==='/api/dsh-access'){const previous=snapshot();if(body.revision!==previous.revision)throw fault('配置已变化，请重新打开此聊天设置。',409);if(!allowedConversation(previous.config.wechat,body.key))throw fault('只能为已允许的聊天分配技能。');const config=structuredClone(previous.config);config.wechat.dshAccess??={chats:{}};config.wechat.dshAccess.chats[body.key]={skills:body.skills,tools:body.tools};validateConversationSettings(config.wechat);backup(configFile);atomic(configFile,config);statusTime=0;return reply(200,{...snapshot(),pendingApply:false});}
       if(route==='/api/extensions/meme-search')throw fault('表情素材工具由 DSH 项目插件提供，请在 DSH 授权页分配到聊天。',410);
-      const builtinRoute=/^\/api\/extensions\/(native-web-reader|native-search|native-stickers|native-proactive|native-context)$/.exec(route);
+      const builtinRoute=/^\/api\/extensions\/(native-member-memory|dsh-meme|native-web-reader|native-search|native-stickers|native-proactive|native-context)$/.exec(route);
       if(builtinRoute) {
         const previous=snapshot();
         if(body.revision!==previous.revision)throw fault('配置已变化，请重新打开扩展设置。',409);
@@ -433,7 +435,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         const config = validateConsoleConfig(body.config, root);
         if (Object.values(config.ports).includes(boundPort) || Number(new URL(config.hook.baseUrl).port || 80) === boundPort) throw fault('服务端口不能与当前控制台端口重复。');
         backup(configFile); atomic(configFile, config);
-        const withoutStickers=value=>{const copy=structuredClone(value);delete copy.wechat.stickers;delete copy.wechat.search;delete copy.wechat.webReader;delete copy.wechat.proactive;delete copy.wechat.context;delete copy.wechat.chatModes;delete copy.wechat.dshAccess;return copy;};
+        const withoutStickers=value=>{const copy=structuredClone(value);delete copy.wechat.stickers;delete copy.wechat.search;delete copy.wechat.webReader;delete copy.wechat.proactive;delete copy.wechat.context;delete copy.wechat.chatModes;delete copy.wechat.dshAccess;delete copy.wechat.memeLibrary;return copy;};
         if(JSON.stringify(withoutStickers(previous.config))!==JSON.stringify(withoutStickers(config)))markPending(JSON.stringify(previous.config.dsh) !== JSON.stringify(config.dsh) || previous.config.ports.dshPlugin !== config.ports.dshPlugin);
         return reply(200, { ...snapshot(), ...optionalJson(preferenceFile) });
       }

@@ -144,10 +144,11 @@ npm run privacy:check
 
 <img src='./QQ.jpg' width='325'>
 
-## tips
-默认人格的攻击力为**3250**，特别会怼人
-
 
 扩展页采用搜索、分类和状态筛选的卡片布局。dsh-meme 原版插件的安装教程、按聊天授权及联网补图到微信发送的流程见 [dsh-meme 接入说明](docs/DSH_MEME.md)。
 
 群友记忆按稳定成员 ID 记录互动倾向，按微信账号和群聊隔离，模型按需读取 JSON。使用说明见 [群友记忆](docs/MEMBER_MEMORY.md)。
+
+
+## tips
+默认人格的攻击力为**3250**，特别会怼人

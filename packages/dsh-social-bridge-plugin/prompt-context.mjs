@@ -84,8 +84,16 @@ export function migrateChatContext(session, makeMessage) {
 // Two bounded slots: current enabled extension instructions, and disposable
 // turn evidence. Updates replace the effective node instead of appending a
 // new instruction message at every model step or every incoming chat batch.
-export function syncInstructionSlot(session, makeMessage, slot, text) {
-  const prior = active(session).findLast(event => event.type === 'user/message' && event.data.source?.socialInstructionSlot === slot);
+export function syncInstructionSlot(session, makeMessage, slot, text, admissionMessages) {
+  const surface = active(session);
+  // pre-step and request both run BEFORE DSH commits its first system head.
+  // Let the native inbox admission append initial slots after that head. A
+  // request retry without an admission list must not append to an empty log.
+  if (surface[0]?.type !== 'system/message') {
+    if (text && admissionMessages) admissionMessages.push(makeMessage({content:[{type:'text',text}],source:{kind:'wechat-social-bridge',form:'relay',socialInstructionSlot:slot,socialInstructionDigest:digest(text)}}));
+    return;
+  }
+  const prior = surface.findLast(event => event.type === 'user/message' && event.data.source?.socialInstructionSlot === slot);
   if (!text && !prior) return;
   const value = text || TURN_RETIRED, fingerprint = digest(value);
   if (prior?.data.source.socialInstructionDigest === fingerprint) return;

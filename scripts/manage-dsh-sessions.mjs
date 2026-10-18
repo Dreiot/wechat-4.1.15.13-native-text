@@ -22,8 +22,8 @@ else{
   for(const key of keys){
     const [,kind,id]=key.split(':');
     if(!config.wechat.whitelist[kind==='group'?'groups':'private'].map(String).includes(id))throw new Error('Only whitelisted conversations can be managed by this command.');
-    const matches=contacts.filter(c=>c.username && (c.username.includes('@chatroom')?'group':'private')===kind && String(conversationId(c.username,c.displayName))===id);
-    if(matches.length!==1)throw new Error('Conversation mapping is missing or ambiguous.');
+    const matches=contacts.filter(c=>c.username && (c.username.includes('@chatroom')?'group':'private')===kind && String(conversationId(c.username,c.displayName,c.conversationId))===id);
+    if(matches.length!==1)throw new Error('Conversation mapping is missing or ambiguous. Refresh group contacts, or use Reconnect group in Chat scope; the existing DSH session was not deleted.');
     const personaName=config.persona.chats?.[key] ?? config.persona.default;
     const persona=selectRoleText(fs.readFileSync(path.join(root,'roles',personaName+'.md'),'utf8'),'v2');
     const configured=await request('/configure',{conversationKey:key,conversationName:matches[0].displayName,personaName,persona});

@@ -16,7 +16,7 @@ class StickerCollection:
         self.root=pathlib.Path(root).resolve();account_path=str(pathlib.Path(account).resolve())
         self.account_key=hashlib.sha256(((account_path.casefold() if os.name=='nt' else account_path)+'|'+own_wxid).encode()).hexdigest()
         self.folder=self.root/'state/stickers/collected'/self.account_key[:32];self.index=self.folder/'index.json'
-        self.active=active;self.lock=threading.RLock()
+        self.active=active;self.lock=threading.RLock();self.import_lock=threading.Lock()
 
     def safe(self,file):
         file=pathlib.Path(file)
@@ -47,6 +47,8 @@ class StickerCollection:
             if type(item.get('attempts',0)) is not int or not 0<=item.get('attempts',0)<=3:raise RuntimeError('STICKER_COLLECTION_INDEX_INVALID')
         for image_id,item in state['aliases'].items():
             if not HEX.fullmatch(image_id) or not isinstance(item,dict) or not HEX.fullmatch(str(item.get('digest',''))) or not CHAT.fullmatch(str(item.get('key',''))):raise RuntimeError('STICKER_COLLECTION_INDEX_INVALID')
+        removed=state.get('removed',{})
+        if not isinstance(removed,dict) or len(removed)>512 or any(not HEX.fullmatch(digest) or type(at) is not int for digest,at in removed.items()):raise RuntimeError('STICKER_COLLECTION_INDEX_INVALID')
         if legacy:
             # Preserve the old index and files; excess entries await DS review.
             backup=self.safe(self.folder/'index.v1.bak')
@@ -76,7 +78,7 @@ class StickerCollection:
         if not match or int(match[2])>9007199254740991:return False
         policy=policy if policy is not None else self.policy()
         return match[2] in map(str,policy.get('whitelist',{}).get('private' if match[1]=='private' else 'groups',[]))
-    def usable(self,item,policy=None):return any(self.allowed(key,policy) for key in item.get('sources',{}))
+    def usable(self,item,policy=None):return item.get('manual') is True or any(self.allowed(key,policy) for key in item.get('sources',{}))
     def can_collect(self,key):return self.active() and self.allowed(key) and self.enabled()
     def revision(self,state):return hashlib.sha256(json.dumps(list(state['entries'])).encode()).hexdigest()
 
@@ -112,10 +114,12 @@ class StickerCollection:
             width,height=image.size;animated=getattr(image,'n_frames',1)>1
         digest=hashlib.sha256(raw).hexdigest();fields={**fields,'width':width,'height':height,'md5':hashlib.md5(raw).hexdigest(),'len':len(raw)}
         with self.lock:
-            state=self.read();where='entries' if digest in state['entries'] or len(state['entries'])<MAX_ENTRIES else 'waiting'
+            state=self.read()
+            if digest in state.get('removed',{}):return False
+            where='entries' if digest in state['entries'] or len(state['entries'])<MAX_ENTRIES else 'waiting'
             if where=='waiting' and digest not in state['waiting'] and len(state['waiting'])>=MAX_WAITING:return False
             old=state['entries'].get(digest,state['waiting'].get(digest,state['archive'].get(digest,{})))
-            item={'fields':fields,'sourceMd5':old.get('sourceMd5',source_md5),'sourceMd5s':list(dict.fromkeys([source_md5,*old.get('sourceMd5s',[old.get('sourceMd5',source_md5)])]))[:8],
+            item={**{name:old[name] for name in ('manual','name','manualLabel') if name in old},'fields':fields,'sourceMd5':old.get('sourceMd5',source_md5),'sourceMd5s':list(dict.fromkeys([source_md5,*old.get('sourceMd5s',[old.get('sourceMd5',source_md5)])]))[:8],
                   'receivedAt':max(int(received_at),old.get('receivedAt',0)),'sources':dict(sorted({**old.get('sources',{}),key:int(received_at)}.items(),key=lambda pair:pair[1],reverse=True)[:100]),'animated':animated}
             if not can_store():return False
             self.safe(self.folder).mkdir(parents=True,exist_ok=True);file=self.safe(self.folder/(digest+'.gif'))
@@ -130,7 +134,7 @@ class StickerCollection:
     def bound_id(self,key,digest):return hashlib.sha256(('group-sticker:'+self.account_key+':'+key+':'+digest).encode()).hexdigest()
     def eligible(self,item,key,policy):
         settings=policy.get('stickers',{});shared=settings.get('shareEnabled',settings.get('shareGroups',True)) is True
-        return key in item.get('sources',{}) or shared and self.usable(item,policy)
+        return item.get('manual') is True or key in item.get('sources',{}) or shared and self.usable(item,policy)
     def verified_bytes(self,digest,item):
         if not HEX.fullmatch(digest):raise RuntimeError('STICKER_COLLECTION_INDEX_INVALID')
         file=self.safe(self.folder/(digest+'.gif'));fields=item['fields']
@@ -162,7 +166,7 @@ class StickerCollection:
                 try:self.resource_from(state,digest,key,image_id)
                 except (PermissionError,RuntimeError,OSError):continue
                 state['aliases'][image_id]={'digest':digest,'key':key}
-                result.append({'id':image_id,'receivedAt':item['receivedAt'],'sourceMd5':item['sourceMd5'],'sourceMd5s':item.get('sourceMd5s',[item['sourceMd5']]),'nativeMd5':item['fields']['md5'],'origin':'sticker-pool'})
+                result.append({'id':image_id,'receivedAt':item['receivedAt'],'sourceMd5':item['sourceMd5'],'sourceMd5s':item.get('sourceMd5s',[item['sourceMd5']]),'nativeMd5':item['fields']['md5'],'origin':'sticker-pool',**({'manualLabel':item['manualLabel']} if item.get('manualLabel') else {})})
                 if len(result)>=limit:break
             while len(state['aliases'])>4096:state['aliases'].pop(next(iter(state['aliases'])))
             if result:self.write(state)

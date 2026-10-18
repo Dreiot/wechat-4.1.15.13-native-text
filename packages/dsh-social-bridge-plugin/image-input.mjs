@@ -1,23 +1,35 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import {boundedTask} from './deadline.mjs';
 
-export async function imageBlocks(ctx,root,conversationKey,images,provider,model,{onUnavailable,timeoutMs=25000}={}) {
+export async function imageBlocks(ctx,root,conversationKey,images,provider,model,{onUnavailable,timeoutMs=25000,signal:parentSignal}={}) {
   if (!Array.isArray(images) || images.length>4) throw new Error('IMAGE_BATCH_LIMIT');
   if (!images.length) return [];
   if (images.some(image=>!/^[a-f0-9]{64}$/.test(image?.id ?? ''))) throw new Error('INVALID_IMAGE_REFERENCE');
   const llm=ctx.get('llm'), attachments=ctx.get('attachments');
   if (!llm || !attachments) throw new Error('NATIVE_IMAGE_SERVICES_UNAVAILABLE');
-  const signal=AbortSignal.timeout(timeoutMs);
-  const info=await llm.resolveModelInfo(provider,model,signal);
-  if (!info.inputModalities?.includes('image')) throw new Error('MODEL_IMAGE_INPUT_UNSUPPORTED');
+  const signal=AbortSignal.any([AbortSignal.timeout(timeoutMs),...(parentSignal?[parentSignal]:[])]);
+  const unavailableBlock=(image,index,error)=>{
+    if(!onUnavailable)throw error;
+    // Reject the image itself on binding/integrity/format failures too. Never
+    // admit its bytes, and never leave that bad input at the head of the chat.
+    const safeCode=/^(?:IMAGE_[A-Z_]+|INVALID_IMAGE_DATA|MODEL_IMAGE_INPUT_UNSUPPORTED)$/.test(error.message)?error.message:'IMAGE_READER_NOT_READY';
+    onUnavailable({id:image.id,index,code:error.imageError??(error.name==='TimeoutError'||error.name==='AbortError'?'IMAGE_PROCESS_TIMEOUT':safeCode)});
+    return {type:'text',text:`[本轮附图 I${index+1} 读取失败，未提供画面；不要猜测内容。其余成功附图仍可使用。]`};
+  };
+  let info;
+  try{info=await boundedTask(s=>llm.resolveModelInfo(provider,model,s),{timeoutMs,signal});}
+  catch(error){return images.map((image,index)=>unavailableBlock(image,index,error));}
+  if (!info.inputModalities?.includes('image')) return images.map((image,index)=>unavailableBlock(image,index,new Error('MODEL_IMAGE_INPUT_UNSUPPORTED')));
   const io=JSON.parse(fs.readFileSync(path.join(root,'state/wechat-io-config.json'),'utf8').replace(/^\uFEFF/,''));
   const base=new URL(io.reader_base_url);
   if (base.protocol!=='http:' || base.hostname!=='127.0.0.1' || base.username || base.password || base.pathname!=='/' || base.search || base.hash) throw new Error('IMAGE_READER_LOOPBACK_REQUIRED');
-  const blocks=[];
-  for (const [index,image] of images.entries()) {
+  const blocks=new Array(images.length);let next=0;
+  async function prepare(image,index) {
     try {
-    const response=await fetch(base.origin+'/api/v1/images/'+image.id,{headers:{Authorization:'Bearer '+io.reader_token},redirect:'error',signal:AbortSignal.any([signal,AbortSignal.timeout(12000)])});
+    return await boundedTask(async taskSignal=>{
+    const response=await fetch(base.origin+'/api/v1/images/'+image.id,{headers:{Authorization:'Bearer '+io.reader_token},redirect:'error',signal:taskSignal});
     if (!response.ok) {
       const failure = await response.json().catch(() => ({}));
       const error = new Error('IMAGE_READER_NOT_READY');
@@ -30,14 +42,15 @@ export async function imageBlocks(ctx,root,conversationKey,images,provider,model
     const data=Buffer.from(content.b64,'base64');
     if (!data.length || data.length>768*1024 || data.toString('base64')!==content.b64 || crypto.createHash('sha256').update(data).digest('hex')!==content.sha256) throw new Error('IMAGE_INTEGRITY_FAILED');
     const attachment=await attachments.saveImage({data,mediaType:content.mime,name:'wechat-image-'+image.id.slice(0,12)});
-    blocks.push({type:'image',attachment});
+    return {type:'image',attachment};
+    },{timeoutMs:12000,signal});
     } catch(error) {
-      const unavailable=error.message==='IMAGE_READER_NOT_READY'||['TimeoutError','AbortError'].includes(error.name);
-      if(!onUnavailable||!unavailable)throw error;
-      onUnavailable({id:image.id,index,code:error.imageError??(error.name==='TimeoutError'||error.name==='AbortError'?'IMAGE_PROCESS_TIMEOUT':'IMAGE_READER_NOT_READY')});
-      blocks.push({type:'text',text:`[本轮附图 I${index+1} 读取失败，未提供画面；不要猜测内容。其余成功附图仍可使用。]`});
+      return unavailableBlock(image,index,error);
     }
   }
+  await Promise.all(Array.from({length:Math.min(2,images.length)},async()=>{
+    while(next<images.length){const index=next++;blocks[index]=await prepare(images[index],index);}
+  }));
   return blocks;
 }
 
@@ -54,7 +67,9 @@ export function offloadCompletedImages(session,sourceSeqs) {
 }
 
 export function offloadCompletedSessionImages(session) {
-  const completed=session.snapshotEvents().findLast(event=>event.type==='turn/end' && event.data.reason?.kind==='completed');
+  // Failed/cancelled vision turns must release their image bytes too. Keeping
+  // an invalid attachment active makes every later text request fail again.
+  const completed=session.snapshotEvents().findLast(event=>event.type==='turn/end');
   if(!completed)return;
   const seqs=session.surface.nodes.filter(seq=>{
     const event=session.eventAt(seq);

@@ -1,6 +1,8 @@
 import { incomingWebUrls } from '../../../../packages/dsh-social-bridge-plugin/web-reader-policy.mjs';
 import { buildConversationKey } from './conversation-key.js';
 import { replyDeliveryParts } from './message-buffer.js';
+import {MediaOutbox} from './media-outbox.js';
+import {boundedTask} from '../../../../packages/dsh-social-bridge-plugin/deadline.mjs';
 import {memberObservations} from '../../../../packages/dsh-social-bridge-plugin/member-memory.mjs';
 import crypto from 'node:crypto';
 import { LOCKED_BEHAVIOR_REPLY, isBehaviorChangeCommand } from './chat-policy.js';
@@ -96,7 +98,7 @@ export class SocialEngine {
     this.pendingDirect = new Set(); this.sentAt = new Map();
     this.decisions = new Map();
     this.stickerSelect=stickerSelect;
-    this.deliveryRetry={busyDelayMs:500,busyTimeoutMs:30000,maxBusyRetries:6,receiptDelayMs:1500,maxReceiptChecks:2,...deliveryRetry};
+    this.deliveryRetry={busyDelayMs:500,busyTimeoutMs:30000,maxBusyRetries:6,receiptDelayMs:1500,maxReceiptChecks:2,mediaDeadlineMs:45000,mediaCallTimeoutMs:10000,...deliveryRetry};
     for(const [name,value]of Object.entries(this.deliveryRetry))if(!Number.isSafeInteger(value)||value<1||value>60000||/^(maxBusyRetries|maxReceiptChecks)$/.test(name)&&value>8)throw new TypeError('Invalid delivery retry limit');
     for(const [key,item] of buffer.pendingReplies??[]){
       if(item.parts?.length||buffer.unread(key,buffer.maxPerChat).some(row=>row.id===item.throughId))this.decisions.set(key,item);
@@ -115,6 +117,9 @@ export class SocialEngine {
       if(times.length)this.lastReplyAt.set(key,times.at(-1));
       this.sentAt.set(key,times.filter(time => now-time<600000));
     }
+    this.media=new MediaOutbox({buffer,send:(...args)=>this.sendSticker(...args),policy:message=>this.stickerPolicyFor(message),retry:this.deliveryRetry,log,
+      quota:key=>replyCooldown(this.sentAt.get(key)??[],Date.now(),{intervalMs:0,maxPerMinute,maxPerTenMinutes}).readyAt,
+      noteOutgoing:(key,at)=>this.noteOutgoing(key,at)});
   }
 
   receive(message) {
@@ -203,7 +208,7 @@ export class SocialEngine {
       const incomingImages=chatRows.flatMap(row=>row.images??[]);
       const incomingStickers=incomingImages.filter(image=>image.kind==='sticker');
       if(policy.labelCache&&incomingStickers.length){
-        try{knownLabels=(await this.stickerLabelsFor(message,incomingStickers.map(image=>image.id))).filter(item=>cleanStickerLabel(item));}catch{this.log(`[Social] ${key} sticker_labels_unavailable`);}
+        try{knownLabels=(await boundedTask(()=>this.stickerLabelsFor(message,incomingStickers.map(image=>image.id)),{timeoutMs:2000})).filter(item=>cleanStickerLabel(item));}catch{this.log(`[Social] ${key} sticker_labels_unavailable`);}
       }
       const known=new Map(knownLabels.map(item=>[item.id,item]));
       const labelledRows=chatRows.map(row=>({...row,text:row.text+(row.images??[]).filter(image=>known.has(image.id)).map(image=>'\n[表情内容缓存：'+known.get(image.id).description+'；标签：'+known.get(image.id).tags.join('、')+']').join('')}));
@@ -215,13 +220,16 @@ export class SocialEngine {
       const contextNotice=this.buffer.contextNotices.get(key);
       if(contextNotice)prompt+='\n本机发送状态说明（不改变人格）：'+quote(contextNotice.text);
       let stickerChoices=[];
+      const requestedSticker=/(?:发|给|来|用|找|搜|换|回|选).{0,12}(?:表情|贴纸|梗图)|(?:表情|贴纸|梗图).{0,8}(?:发|回复|给我)/.test(chatRows.map(row=>row.text).join('\n'));
       const decisionImages=incomingImages.filter(image=>!known.has(image.id));
       const stickerRefs={};
       if(!remembered&&policy.enabled){
-        try{const offered=(await this.stickerChoicesFor(message)).filter(item=>/^[a-f0-9]{64}$/.test(item?.id??'')).slice(0,20).map(item=>policy.labelCache?item:{id:item.id,receivedAt:item.receivedAt});stickerChoices=this.stickerSelect(offered,chatRows.map(row=>row.text).join('\n'),new Set(decisionImages.map(image=>image.id)),policy);}catch(error){this.log(`[Social] ${key} sticker_catalog_unavailable`);}
+        try{const offered=(await boundedTask(()=>this.stickerChoicesFor(message),{timeoutMs:2000})).filter(item=>/^[a-f0-9]{64}$/.test(item?.id??'')).slice(0,20).map(item=>policy.labelCache?item:{id:item.id,receivedAt:item.receivedAt});stickerChoices=this.stickerSelect(offered,chatRows.map(row=>row.text).join('\n'),new Set(decisionImages.map(image=>image.id)),policy);}catch(error){this.log(`[Social] ${key} sticker_catalog_unavailable`);}
         for(const item of stickerChoices){
           if(decisionImages.length>=4)break;
-          if(!cleanStickerLabel(item)&&!decisionImages.some(image=>image.id===item.id))decisionImages.push({id:item.id,kind:'sticker'});
+          // Candidate-only media must not turn an ordinary text message into
+          // a blocking vision request. Explicit image requests may preview two.
+          if(requestedSticker&&!cleanStickerLabel(item)&&!decisionImages.some(image=>image.id===item.id)&&decisionImages.filter(image=>!incomingImages.some(input=>input.id===image.id)).length<2)decisionImages.push({id:item.id,kind:'sticker'});
         }
         stickerChoices=stickerChoices.filter(item=>cleanStickerLabel(item)||decisionImages.some(image=>image.id===item.id));
         stickerChoices.forEach((item,i)=>{stickerRefs['S'+(i+1)]=item.id;});
@@ -282,7 +290,7 @@ export class SocialEngine {
       if(!remembered?.sending&&searchPolicyKey(await getSearchPolicy())!==searchKey){this.decisions.delete(key);this.dirty.add(key);return;}
       if(result.stickerId && !remembered && !stickerChoices.some(item=>item.id===result.stickerId))throw new Error('STICKER_CHOICE_NOT_ALLOWED');
       const learned=(output?.labels??[]).filter(item=>annotationRefs[item.ref]).map(item=>({id:annotationRefs[item.ref],description:item.description,tags:item.tags}));
-      if(learned.length)try{await this.saveStickerLabels(message,learned);}catch{this.log(`[Social] ${key} sticker_label_save_failed`);}
+      if(learned.length)try{await boundedTask(()=>this.saveStickerLabels(message,learned),{timeoutMs:2000});}catch{this.log(`[Social] ${key} sticker_label_save_failed`);}
       this.log(`[Social] ${key} decision=${result.decision} decision_ms=${Date.now()-decisionStarted}`);
       if (result.decision === 'RESPOND' || result.decision==='STICKER') {
         const target = remembered?.message ?? message;
@@ -338,6 +346,10 @@ export class SocialEngine {
     };
     for(const [index,part]of pending.parts.entries()){
       if(['confirmed','unconfirmed','failed','cancelled','expired'].includes(part.state))continue;
+      if(part.stickerId){
+        this.media.enqueue(key,pending,part);
+        return finish();
+      }
       if(part.busyDeadline&&Date.now()>=part.busyDeadline){part.state='expired';this.log(`[Social] ${key} delivery_part=${index+1} state=expired reason=sender_busy operation=${part.deliveryId.slice(0,12)}`);return finish('本机上一轮发送因发送器持续忙碌而超时，尚未发送的文字或表情已取消，不能当成对方已收到。');}
       if(part.retryAt>Date.now())return wait(part.retryAt);
       const receiptOnly=!!part.stickerId&&['sending','submitted'].includes(part.state);
@@ -348,14 +360,24 @@ export class SocialEngine {
       const before=part.state;part.state='sending';delete part.retryAt;persist();
       let delivery;
       try{
-        delivery=part.stickerId?await this.sendSticker(target,part.stickerId,{deliveryId:part.deliveryId,...(receiptOnly?{receiptOnly:true}:{})}):await this.send(target,part.text,{deliveryId:part.deliveryId});
+        delivery=await boundedTask(()=>this.send(target,part.text,{deliveryId:part.deliveryId}),{timeoutMs:15000,code:'TEXT_DELIVERY_TIMEOUT'});
       }catch(error){
+        if(error.code==='TEXT_DELIVERY_TIMEOUT'||/^OneBot action timeout:/.test(error.message??'')){
+          part.state='unconfirmed';
+          this.buffer.recordReplyPart(key,{deliveryId:part.deliveryId},{...target,sender_id:target.self_id,text:part.text,timestamp:Date.now()/1000,delivery_status:'unconfirmed'});
+          return finish('本机上一轮文字发送响应超时，送达情况未知，不自动重发，后续消息继续处理。');
+        }
         if(error.code==='SENDER_BUSY'){
           part.state=receiptOnly?'submitted':'queued';if(receiptOnly)part.receiptChecks--;
           part.busyAttempts=(part.busyAttempts??0)+1;part.busyDeadline??=Date.now()+retry.busyTimeoutMs;
           if(part.busyAttempts>retry.maxBusyRetries){part.state='expired';this.log(`[Social] ${key} delivery_part=${index+1} state=expired reason=sender_busy operation=${part.deliveryId.slice(0,12)}`);return finish('本机上一轮发送因发送器持续忙碌而超时，尚未发送的文字或表情已取消，不能当成对方已收到。');}
           const at=Math.min(part.busyDeadline,Date.now()+Math.min(5000,retry.busyDelayMs*2**(part.busyAttempts-1)));
           this.log(`[Social] ${key} delivery_part=${index+1} state=queued reason=sender_busy retry=${part.busyAttempts} operation=${part.deliveryId.slice(0,12)}`);return wait(at);
+        }
+        if(!part.stickerId&&(error.code==='NATIVE_SEND_REJECTED'||error.data?.rejected===true&&/^API_HTTP_(400|401|403|409)$/.test(error.code??''))){
+          part.state='failed';
+          this.log(`[Social] ${key} delivery_part=${index+1} state=failed reason=${error.code} operation=${part.deliveryId.slice(0,12)}`);
+          return finish('本机上一轮回复中的文字被发送端明确拒绝，未发送部分已取消；不能当作对方已收到，继续处理新消息。');
         }
         if(!part.stickerId){part.state=before;persist();throw error;}
         if(error.code&&error.code!=='STICKER_DELIVERY_UNCONFIRMED'){
@@ -397,5 +419,5 @@ export class SocialEngine {
     }
   }
 
-  stop() { this.stopped=true;for (const timer of this.timers.values()) clearTimeout(timer); this.timers.clear(); }
+  stop() { this.stopped=true;this.media.stop();for (const timer of this.timers.values()) clearTimeout(timer); this.timers.clear(); }
 }

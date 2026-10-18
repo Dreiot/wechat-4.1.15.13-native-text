@@ -12,7 +12,13 @@ import { setTimeout as sleep } from 'node:timers/promises';
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = file => JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
 export const onebotId = value => Number(crypto.createHash('sha256').update(String(value)).digest().readBigUInt64BE(0) % 2147483647n + 1n);
-export const conversationId = (wxid, name) => onebotId(wxid.includes('@chatroom') ? (name || wxid).replace(/\s*\(\d+\)\s*$/, '').trim() : wxid);
+export const conversationId = (wxid, name, mappedId) => {
+  if(mappedId!==undefined){
+    if(!/^[1-9]\d*$/.test(String(mappedId))||!Number.isSafeInteger(Number(mappedId)))throw new Error('INVALID_CONVERSATION_ID');
+    return Number(mappedId);
+  }
+  return onebotId(wxid.includes('@chatroom') ? (name || wxid).replace(/\s*\(\d+\)\s*$/, '').trim() : wxid);
+};
 class AdapterError extends Error { constructor(code,data) { super(code); this.name = 'AdapterError';this.data=data; } }
 const fail = code => { throw new AdapterError(code); };
 const cleanAccountId = value => String(value ?? '').replace(/_[a-zA-Z0-9]{4}$/, '');
@@ -123,7 +129,7 @@ export class HookOneBot {
     const data = await this.reader('/api/v1/sessions?limit=500');
     const matches = (data.sessions ?? []).filter(s => s.username &&
       (s.username.includes('@chatroom') ? 'group' : 'private') === kind &&
-      String(conversationId(s.username, s.displayName)) === String(target));
+      String(conversationId(s.username, s.displayName, s.conversationId)) === String(target));
     if (matches.length !== 1 || matches[0].username === this.ownWxid) fail('TARGET_MAPPING_AMBIGUOUS_OR_MISSING');
     return matches[0].username;
   }
@@ -146,7 +152,13 @@ export class HookOneBot {
       if(attempt?.state==='confirmed'&&(deliveryId||Date.now()-attempt.confirmedAt<60000)){
         this.status.last_error='';return {...attempt.response,reused:true};
       }
-      if(attempt?.state==='rejected')fail('NATIVE_SEND_REJECTED');
+      // Rejections are definitive pre-submission failures. Legacy records do
+      // not carry the original reason, so never blindly resubmit those.
+      let rejectedBusy;
+      if(attempt?.state==='rejected'){
+        if(attempt.rejection?.code==='API_HTTP_429'){rejectedBusy=attempt;attempt=null;}
+        else throw new AdapterError(attempt.rejection?.code??'NATIVE_SEND_REJECTED',{rejected:true,attempted:false,delivery_id:deliveryId??operation});
+      }
       if(attempt?.state==='confirmed')attempt=null;
       this.reload();
       if (!this.allowed(kind, target)) fail('CONVERSATION_NOT_ALLOWED');
@@ -162,16 +174,24 @@ export class HookOneBot {
         }
         const baseline=currentRows.map(row=>String(row.localId)).filter(id=>/^\d+$/.test(id));
         attempt={version:1,key:operation,deliveryId:deliveryId??'',account:identity.account,wxid,text,baseline,
-          startedAt:Date.now(),state:'dispatching'};
+          startedAt:Date.now(),state:'dispatching',...(rejectedBusy?{rejection:rejectedBusy.rejection,firstRejection:rejectedBusy.firstRejection??rejectedBusy.rejection}:{})};
         this.textDeliveries.put(attempt); // Persist before submission; replay must never submit it twice.
+        const reject=(code,nativeRet)=>{
+          const rejection={code,at:Date.now(),...(Number.isSafeInteger(nativeRet)?{nativeRet}:{})};
+          attempt.state='rejected';attempt.rejection=rejection;attempt.firstRejection??=rejection;
+          this.textDeliveries.put(attempt);
+        };
         let accepted;
         try{accepted=await this.native('/SendTextMsg',{wxidorgid:wxid,msg:text},identity.account);}
         catch(error){
-          if(/^API_HTTP_(400|401|403|409|429)$/.test(error.message)){attempt.state='rejected';this.textDeliveries.put(attempt);throw error;}
+          if(/^API_HTTP_(400|401|403|409|429)$/.test(error.message)){
+            reject(error.message);
+            throw new AdapterError(error.message==='API_HTTP_429'?'SENDER_BUSY':error.message,{rejected:true,attempted:false,delivery_id:deliveryId??operation});
+          }
           attempt.state='unconfirmed';this.textDeliveries.put(attempt);
           throw new AdapterError('TEXT_DELIVERY_UNCONFIRMED',{attempted:true,delivery_id:deliveryId??operation});
         }
-        if(accepted?.ret!==0){attempt.state='rejected';this.textDeliveries.put(attempt);fail('NATIVE_SEND_REJECTED');}
+        if(accepted?.ret!==0){reject('NATIVE_SEND_REJECTED',accepted?.ret);throw new AdapterError('NATIVE_SEND_REJECTED',{rejected:true,attempted:false,delivery_id:deliveryId??operation});}
         attempt.state='accepted';this.textDeliveries.put(attempt);
       }
       const deadline = Date.now() + (this.receiptOverride ?? this.hook.receiptTimeoutMs ?? 18000);
@@ -219,13 +239,23 @@ export class HookOneBot {
     fs.writeFileSync(temp,JSON.stringify({version:1,attempts:[...this.stickerPending].map(([key,item])=>[key,{...item,baseline:[...item.baseline]}])}),{mode:0o600});
     fs.renameSync(temp,this.stickerStateFile);
   }
-  async sendSticker(kind,target,id,deliveryId,receiptOnly=false){
+  async sendSticker(kind,target,id,deliveryId,receiptOnly=false,deferReceipt=false,deadlineAt,abandon=false){
+    if(abandon&&(!deliveryId||!receiptOnly))fail('INVALID_RECEIPT_QUERY');
     this.reload();
     if(!this.allowed(kind,target))fail('CONVERSATION_NOT_ALLOWED');
     if(!/^[a-f0-9]{64}$/.test(id))fail('INVALID_STICKER_REFERENCE');
     const operation=deliveryId?this.textDeliveries.key(kind,target,deliveryId,'[STICKER:'+id+']'):null;
     const completed=operation?this.textDeliveries.get(operation):null;
     if(completed&&completed.text!=='[STICKER:'+id+']')fail('TEXT_DELIVERY_ID_CONFLICT');
+    if(abandon){
+      const key=`${kind}:${target}`,attempt=this.stickerPending.get(key);
+      if(this.targetsSending.has(key))fail('SENDER_BUSY');
+      if(attempt?.deliveryId===deliveryId&&attempt.id===id){
+        if(completed?.state!=='confirmed')this.textDeliveries.put({version:1,key:operation,deliveryId,account:attempt.account,wxid:attempt.wxid,text:'[STICKER:'+id+']',baseline:[],startedAt:attempt.started*1000,state:'unconfirmed'});
+        this.stickerPending.delete(key);this.persistStickerPending();
+      }
+      return {released:true};
+    }
     if(!stickerPolicy(this.project.wechat,'wechat:'+kind+':'+target).enabled&&!this.stickerPending.has(`${kind}:${target}`)&&completed?.state!=='confirmed')fail('STICKER_SENDING_DISABLED');
     const key=`${kind}:${target}`;
     if(this.targetsSending.has(key)||this.targetsSending.size>=(this.hook.maxConcurrentSends??4))fail('SENDER_BUSY');
@@ -233,6 +263,14 @@ export class HookOneBot {
     try{
       const identity=await this.checkNative();if(!this.status.native_sticker_send)fail('NATIVE_STICKER_UNAVAILABLE');
       const wxid=await this.resolveTarget(kind,target),conversationKey='wechat:'+key;
+      const stale=this.stickerPending.get(key);
+      if(stale&&Date.now()-stale.started*1000>60000){
+        if(stale.deliveryId){
+          const oldKey=this.textDeliveries.key(kind,target,stale.deliveryId,'[STICKER:'+stale.id+']');
+          if(this.textDeliveries.get(oldKey)?.state!=='confirmed')this.textDeliveries.put({version:1,key:oldKey,deliveryId:stale.deliveryId,account:stale.account,wxid:stale.wxid,text:'[STICKER:'+stale.id+']',baseline:[],startedAt:stale.started*1000,state:'unconfirmed'});
+        }
+        this.stickerPending.delete(key);this.persistStickerPending();
+      }
       if(completed?.state==='confirmed'){
         if(completed.account!==identity.account||completed.wxid!==wxid)fail('TEXT_DELIVERY_ACCOUNT_MISMATCH');
         if(this.stickerPending.get(key)?.id===id){this.stickerPending.delete(key);this.persistStickerPending();}
@@ -240,15 +278,21 @@ export class HookOneBot {
       }
       const keyOf=row=>JSON.stringify([row.localId,row.createTime]);
       let attempt=this.stickerPending.get(key);
+      // A persisted uncertain operation without its receipt state is terminal:
+      // allow a new delivery ID, but never submit the old one a second time.
+      const prior=operation?this.textDeliveries.get(operation):null;
+      if(!attempt&&prior&&prior.state!=='confirmed')fail('STICKER_RECEIPT_STATE_UNAVAILABLE');
       if(attempt && attempt.id!==id)fail('STICKER_PREVIOUS_DELIVERY_UNCONFIRMED');
       if(attempt && (attempt.account!==identity.account || attempt.wxid!==wxid))fail('STICKER_DELIVERY_ACCOUNT_MISMATCH');
       if(receiptOnly&&(!attempt||attempt.deliveryId&&attempt.deliveryId!==deliveryId))fail('STICKER_RECEIPT_STATE_UNAVAILABLE');
       if(!attempt){
+      if(deadlineAt!==undefined&&Date.now()>=deadlineAt)fail('STICKER_DELIVERY_EXPIRED');
       const sticker=await this.reader('/api/v1/stickers/'+id+'?conversationKey='+encodeURIComponent(conversationKey));
       if(sticker.id!==id || sticker.conversationKey!==conversationKey || !/^[a-f0-9]{32}$/.test(sticker.fields?.md5??''))fail('STICKER_BINDING_INVALID');
         attempt={id,md5:sticker.fields.md5,account:identity.account,wxid,deliveryId,baseline:new Set((await this.messages(wxid)).map(keyOf)),started:Math.floor(Date.now()/1000)-1};
         this.reload();if(!this.allowed(kind,target))fail('CONVERSATION_NOT_ALLOWED');
         if(!stickerPolicy(this.project.wechat,conversationKey).enabled)fail('STICKER_SENDING_DISABLED');
+        if(deadlineAt!==undefined&&Date.now()>=deadlineAt)fail('STICKER_DELIVERY_EXPIRED');
         this.stickerPending.set(key,attempt);
         this.persistStickerPending();
         let accepted;
@@ -270,7 +314,7 @@ export class HookOneBot {
             return response;
           }
         }
-        if(receiptOnly)break;
+        if(receiptOnly||deferReceipt)break;
         await sleep(this.pollMs);
       }while(Date.now()<deadline&&!this.stopped);
       throw new AdapterError('STICKER_DELIVERY_UNCONFIRMED',{attempted:true,delivery_id:deliveryId??''});
@@ -292,10 +336,13 @@ export class HookOneBot {
         const deliveryId=params.wechatagent_delivery_id;
         if(deliveryId!==undefined&&!/^[a-f0-9]{64}$/.test(deliveryId))fail('INVALID_DELIVERY_ID');
         if(params.wechatagent_receipt_only!==undefined&&typeof params.wechatagent_receipt_only!=='boolean')fail('INVALID_RECEIPT_QUERY');
+        if(params.wechatagent_defer_receipt!==undefined&&typeof params.wechatagent_defer_receipt!=='boolean')fail('INVALID_RECEIPT_QUERY');
+        if(params.wechatagent_abandon_delivery!==undefined&&(typeof params.wechatagent_abandon_delivery!=='boolean'||params.wechatagent_abandon_delivery&&(!deliveryId||params.wechatagent_receipt_only!==true)))fail('INVALID_RECEIPT_QUERY');
+        if(params.wechatagent_deadline_at!==undefined&&(!Number.isSafeInteger(params.wechatagent_deadline_at)||params.wechatagent_deadline_at<0||params.wechatagent_deadline_at>Date.now()+60000))fail('INVALID_DELIVERY_DEADLINE');
         if(params.wechatagent_receipt_only===true&&(!deliveryId||!Array.isArray(params.message)||params.message.length!==1||params.message[0]?.type!=='wechat_sticker'))fail('INVALID_RECEIPT_QUERY');
         if(Array.isArray(params.message)&&params.message.length===1&&params.message[0]?.type==='wechat_sticker'){
           if(params.wechatagent_source!==undefined)fail('PROACTIVE_TEXT_ONLY');
-          data=await this.sendSticker(kind,target,String(params.message[0].data?.id??''),deliveryId,params.wechatagent_receipt_only===true);
+          data=await this.sendSticker(kind,target,String(params.message[0].data?.id??''),deliveryId,params.wechatagent_receipt_only===true,params.wechatagent_defer_receipt===true,params.wechatagent_deadline_at,params.wechatagent_abandon_delivery===true);
         }else{
           const text=textSegments(params.message);
           if(params.wechatagent_source!==undefined&&params.wechatagent_source!=='proactive')fail('INVALID_SEND_SOURCE');
@@ -316,7 +363,7 @@ export class HookOneBot {
         const kind = action === 'get_group_list' ? 'group' : 'private';
         const sessions = (await this.reader('/api/v1/sessions?limit=500')).sessions ?? [];
         data = sessions.filter(s => s.username && (s.username.includes('@chatroom') ? 'group' : 'private') === kind)
-          .map(s => ({ id: conversationId(s.username, s.displayName), name: s.displayName ?? s.username }))
+          .map(s => ({ id: conversationId(s.username, s.displayName, s.conversationId), name: s.displayName ?? s.username }))
           .filter(s => this.allowed(kind, s.id)).map(s => kind === 'group' ? { group_id: s.id, group_name: s.name } : { user_id: s.id, nickname: s.name, remark: s.name });
       } else fail('ACTION_UNSUPPORTED');
       return { ...response, status: 'ok', retcode: 0, data };
@@ -336,7 +383,7 @@ export class HookOneBot {
     if ([3,47].includes(payload.type) && !/^[a-f0-9]{64}$/.test(payload.image?.id ?? '')) return null;
     if (payload.type === PAT_TYPE && (!this.ownWxid || payload.pat?.target !== cleanAccountId(this.ownWxid) || payload.pat?.actor !== payload.talkerId || payload.pat.actor === cleanAccountId(this.ownWxid))) return null;
     const group = payload.sessionId.includes('@chatroom'), kind = group ? 'group' : 'private';
-    const target = conversationId(payload.sessionId, payload.groupName);
+    const target = conversationId(payload.sessionId, payload.groupName, payload.conversationId);
     if (!this.allowed(kind, target)) return null;
     const selfId = onebotId(this.ownWxid), userId = onebotId(group ? payload.talkerId : payload.sessionId);
     if(quoteReply){

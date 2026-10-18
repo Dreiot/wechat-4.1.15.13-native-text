@@ -11,7 +11,7 @@ export function createExtensionUI({api,modal,closeModal,confirmAction,escapeHtml
   const status=item=>`<span class="status-tag ${esc(item.statusTone??'')}" data-extension-status>${esc(item.statusLabel ?? (item.enabled?'已开启':'已关闭'))}</span>`;
   async function page() {
     catalog=await api('/api/extensions');
-    return market.page(catalog,await dshUI.page());
+    return `<section class="card"><div class="sticker-toolbar"><div><h2>共享表情包</h2><p class="card-description">查看当前账号的表情池，手动添加图片并编辑描述、标签。</p></div><a class="button" href="#stickers">${icon('image')}管理表情包</a></div></section>`+market.page(catalog,await dshUI.page());
   }
   const footer=()=>'<p class="extension-error" id="extension-error" role="alert" hidden></p><div class="modal-actions"><button class="button" type="button" data-close>取消</button><button class="button primary" type="submit">保存扩展设置</button></div>';
   function errorInForm(error) {const field=document.querySelector('#extension-error');if(field){field.textContent=error.message;field.hidden=false;}else toast(error.message);}

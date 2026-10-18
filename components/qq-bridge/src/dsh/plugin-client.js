@@ -22,21 +22,26 @@ export class DshPluginClient {
 
   async modelSearchReady(){await this.searchReady();return this.modelSearchSupported===true;}
 
-  async followup(conversationKey, message, metadata = {}) {
+  async followup(conversationKey, message, metadata = {}, {busyRetries=0}={}) {
     const response = await fetch(`${this.url}/followup`, {
       method: 'POST', headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
       body: JSON.stringify({ ...metadata, conversationKey, message }), signal: AbortSignal.timeout(this.timeoutMs + (metadata.images?.length ? 80000 : 0)),
     });
     const body = await response.json();
-    if (!response.ok && body.error === 'agent_unavailable' && body.detail === 'IMAGE_READER_NOT_READY' && metadata.images?.length) {
-      // This specific failure occurs before admission of the model turn. Do
-      // not retry model, integrity, permission or conversation-binding errors.
-      const reason = typeof body.imageError === 'string' && /^IMAGE_[A-Z_]{3,80}$/.test(body.imageError) ? body.imageError : 'IMAGE_READER_NOT_READY';
+    if(!response.ok&&body.error==='agent_unavailable'&&body.detail==='session_busy'&&busyRetries>0){
+      await new Promise(resolve=>setTimeout(resolve,100));return this.followup(conversationKey,message,metadata,{busyRetries:busyRetries-1});
+    }
+    const rejectedVision=!response.ok&&metadata.images?.length&&(body.error==='turn_failed'&&body.code==='INVALID_REQUEST'||body.error==='agent_unavailable'&&body.detail==='agent_timeout');
+    if ((!response.ok && body.error === 'agent_unavailable' && body.detail === 'IMAGE_READER_NOT_READY'||rejectedVision) && metadata.images?.length) {
+      // Before-admission read failures and explicitly failed/cancelled vision
+      // turns can degrade once. A busy cancellation gets a bounded grace period.
+      const reason = rejectedVision?'IMAGE_MODEL_REQUEST_FAILED':typeof body.imageError === 'string' && /^IMAGE_[A-Z_]{3,80}$/.test(body.imageError) ? body.imageError : 'IMAGE_READER_NOT_READY';
       this.log(`[Social] ${conversationKey} attachment_unavailable count=${metadata.images.length} reason=${reason}; continuing with text`);
       const notice = '\n附件状态：本批图片附件读取失败，本轮没有提供图片。不得猜测或声称看到图片内容；可回应其他文字，图片问题请明确说明未能读取。';
       if (message.length + notice.length > 18000) throw new Error('IMAGE_FALLBACK_MESSAGE_TOO_LARGE');
       const fallbackMetadata={...metadata,images:[],...(metadata.batchId?{batchId:crypto.createHash('sha256').update(metadata.batchId+'\0without-images-v1').digest('hex')}:{})};
-      const output=await this.followup(conversationKey,message.replace(/\n<sticker_label_request>[\s\S]*?<\/sticker_label_request>/g,'')+notice,fallbackMetadata);
+      if(rejectedVision){delete fallbackMetadata.searchTicket;delete fallbackMetadata.searchContext;fallbackMetadata.searchOptOut=true;fallbackMetadata.memeLibraryDisabled=true;}
+      const output=await this.followup(conversationKey,message.replace(/\n<sticker_label_request>[\s\S]*?<\/sticker_label_request>/g,'')+notice,fallbackMetadata,{busyRetries:rejectedVision?10:0});
       return output.split(/STICKER_LABELS:/)[0].trim();
     }
     if (!response.ok || body.error) {

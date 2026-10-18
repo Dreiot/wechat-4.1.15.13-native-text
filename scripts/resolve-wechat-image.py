@@ -36,7 +36,7 @@ from wechat_image_normalize import normalize_image
 
 
 def resolve(descriptor):
-    reader = reader_api.Reader(ROOT)
+    reader = reader_api.Reader(ROOT, metadata_readonly=True)
     talker = descriptor['talker']
     if not reader.image_talker_allowed(talker):
         raise RuntimeError('IMAGE_CONVERSATION_NOT_ALLOWED')

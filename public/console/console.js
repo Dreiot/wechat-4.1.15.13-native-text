@@ -4,6 +4,7 @@ import { initAppearance } from './appearance.js';
 import { installExternalLinks } from './external-links.js';
 import { startUpdateUI } from './updates.js';
 import { createExtensionUI } from './extensions.js';
+import {createStickerManagerUI} from './sticker-manager.js';
 import {mergeConversationSave} from './conversation-settings.mjs';
 import {openProcessRecovery} from './process-recovery.js';
 const $ = selector => document.querySelector(selector);
@@ -13,6 +14,7 @@ const state = { token: '', config: null, draft: null, revision: '', page: 'overv
 const roleSaves = new Map();
 installExternalLinks({report:message=>toast(message)});
 const extensionUI = createExtensionUI({api,modal,closeModal,confirmAction,escapeHtml,icon,state,renderPage,toast,onDshSave:(result,key)=>{state.draft=mergeConversationSave(state.config,state.draft,result.config,key);state.config=result.config;state.revision=result.revision;updateDraftUI();refreshStatus();},onProjectSave:syncExtensionProject});
+const stickerManagerUI=createStickerManagerUI({api,modal,closeModal,escapeHtml,icon,state,renderPage,toast});
 const pages = {
   setup: ['首次配置', '按下面的步骤连接自己的微信与模型，无需命令行。'],
   overview: ['概览', '微信助手的运行情况，一眼看清。'],
@@ -24,6 +26,7 @@ const pages = {
   logs: ['运行日志', '查看最近的运行记录，定位连接与收发问题。'],
   tools: ['工具', '安装、检查与维护，通过按钮完成。'],
   extensions: ['扩展', '在 DSH 管理技能与插件，在会话中独立分配能力。'],
+  stickers: ['表情包', '查看、添加与整理当前账号的共享表情包。'],
 };
 const actions = {
   start: ['启动服务', '正在检查账号与连接，启动通常需要几十秒。'],
@@ -170,7 +173,7 @@ function chatsPage() {
     (list.length?'<div class="conversation-list">'+list.map(id=>{
       const key='wechat:'+(kind==='groups'?'group':'private')+':'+id,name=state.names.get(key)||('群聊好友'.slice(kind==='groups'?0:2,kind==='groups'?2:4)+' · '+String(id).slice(-4));
       const saved=state.config.wechat.whitelist[kind].some(value=>String(value)===String(id));
-      return '<article class="conversation-row"><div class="conversation-main"><div class="name-cell"><span class="avatar">'+icon(kind==='groups'?'users':'person')+'</span><div><h3>'+escapeHtml(name)+'</h3><small class="mono">ID '+escapeHtml(id)+'</small></div></div>'+conversationSummary(key)+'</div><div class="conversation-row-actions"><span class="status-tag '+(saved?'ok':'warn')+'">'+(saved?'已允许':'新增待保存')+'</span><div class="button-row"><button class="button small" data-chat-settings="'+key+'" aria-label="设置 '+escapeHtml(name)+'" '+(!saved?'disabled title="请先保存聊天范围"':'')+'>'+icon('sliders')+'会话设置</button><button class="button small" data-dsh-chat="'+key+'" aria-label="分配技能与工具 '+escapeHtml(name)+'" '+(!saved?'disabled title="请先保存聊天范围"':'')+'>'+icon('plug')+'技能与工具</button><button class="icon-button" data-remove-id="'+id+'" aria-label="移出聊天范围 '+escapeHtml(name)+'" title="移出聊天范围">'+icon('close')+'</button></div></div></article>';
+      return '<article class="conversation-row"><div class="conversation-main"><div class="name-cell"><span class="avatar">'+icon(kind==='groups'?'users':'person')+'</span><div><h3>'+escapeHtml(name)+'</h3><small class="mono">ID '+escapeHtml(id)+'</small></div></div>'+conversationSummary(key)+'</div><div class="conversation-row-actions"><span class="status-tag '+(saved?'ok':'warn')+'">'+(saved?'已允许':'新增待保存')+'</span><div class="button-row"><button class="button small" data-chat-settings="'+key+'" aria-label="设置 '+escapeHtml(name)+'" '+(!saved?'disabled title="请先保存聊天范围"':'')+'>'+icon('sliders')+'会话设置</button><button class="button small" data-dsh-chat="'+key+'" aria-label="分配技能与工具 '+escapeHtml(name)+'" '+(!saved?'disabled title="请先保存聊天范围"':'')+'>'+icon('plug')+'技能与工具</button>'+(kind==='groups'&&saved?'<button class="button small" data-rebind-group="'+id+'">重新关联</button>':'')+'<button class="icon-button" data-remove-id="'+id+'" aria-label="移出聊天范围 '+escapeHtml(name)+'" title="移出聊天范围">'+icon('close')+'</button></div></div></article>';
     }).join('')+'</div>':empty(kind==='groups'?'尚未允许任何群聊':'尚未允许任何好友','点击添加，搜索聊天名称并勾选；也可以填写已有的数字 ID。','<button class="button" id="empty-add-chat">'+icon('plus')+'添加聊天</button>','users'))+
     '<div class="notice plain">'+icon('info')+'<span>会话设置独立保存，仅影响当前聊天。新增或移出聊天请点击底部“保存设置”，再重启服务应用。</span></div></section>';
 }
@@ -193,6 +196,29 @@ function addChats() {
     state.draft.wechat.whitelist[kind] = [...new Set([...state.draft.wechat.whitelist[kind].map(String), ...picked.keys(), ...manual])];
     for (const [id, name] of picked) state.names.set(`wechat:${kind === 'groups' ? 'group' : 'private'}:${id}`, name);
     closeModal(); renderPage(); updateDraftUI(); toast('已加入草稿，保存后重启应用。');
+  });
+}
+function reconnectGroup(id) {
+  if(hasDraft())return toast('请先保存或放弃未保存的设置，再重新关联群聊。');
+  modal('重新关联原群聊', `<p class="modal-description">选择微信中原来的同一个群。保留当前人格、技能设置和 DSH 会话，不合并两个不同群的历史。</p><form id="group-reconnect-form"><div class="contact-search"><input id="group-reconnect-keyword" aria-label="原群聊名称" placeholder="输入原群名称或现在的群名称"><button class="button" type="button" id="group-reconnect-search">搜索</button></div><div id="group-reconnect-results" class="contact-results"></div><div id="group-reconnect-error" class="inline-error" role="alert"></div><div class="modal-actions"><button class="button" type="button" data-close>取消</button><button class="button primary" type="submit">确认关联</button></div></form>`);
+  const search=async()=>{
+    const button=$('#group-reconnect-search');button.disabled=true;$('#group-reconnect-error').textContent='';
+    try{
+      const data=await api('/api/contacts?kind=groups&keyword='+encodeURIComponent($('#group-reconnect-keyword').value));
+      if(!$('#group-reconnect-form'))return;
+      if(data.contacts.length&&!data.contacts.some(c=>c.groupRef))throw Error('读取服务尚未加载群关联更新，请重启应用与服务后再试。');
+      $('#group-reconnect-results').innerHTML=data.contacts.filter(c=>c.groupRef).map(c=>`<label class="contact-result"><input type="radio" name="reconnect-group" value="${escapeHtml(c.groupRef)}"><span><strong>${escapeHtml(c.name)}</strong><small>群标识末尾 ${escapeHtml(c.groupRef.replace('@chatroom','').slice(-6))} · ID ${escapeHtml(c.id)}</small></span></label>`).join('')||empty('没有找到匹配的群聊','请在匹配微信中打开该群并等待同步，再搜索。','','search');
+    }catch(error){if($('#group-reconnect-error'))$('#group-reconnect-error').textContent=error.message;}
+    finally{if($('#group-reconnect-search'))$('#group-reconnect-search').disabled=false;}
+  };
+  $('#group-reconnect-search').addEventListener('click',search);
+  $('#group-reconnect-keyword').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();search();}});
+  $('#group-reconnect-form').addEventListener('submit',async event=>{
+    event.preventDefault();const selected=$('#group-reconnect-form input[name=reconnect-group]:checked');
+    if(!selected){$('#group-reconnect-error').textContent='请先搜索并选择原来的群聊。';return;}
+    const button=event.submitter;button.disabled=true;
+    try{const result=await api('/api/group-bindings',{id:String(id),groupRef:selected.value,revision:state.revision});state.names.set('wechat:group:'+id,result.name);closeModal();await renderPage();await refreshStatus();toast('群聊已重新关联，原会话和设置保留。');}
+    catch(error){if($('#group-reconnect-error'))$('#group-reconnect-error').textContent=error.message;button.disabled=false;}
   });
 }
 function rolesPage() {
@@ -368,7 +394,7 @@ async function renderPage() {
   document.querySelectorAll('[data-page]').forEach(a => page === a.dataset.page ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
   let markup;
   try {
-    if (['sessions', 'logs', 'extensions'].includes(page)) $('#page-body').innerHTML = '<div class="loading-state">正在读取…</div>';
+    if (['sessions', 'logs', 'extensions', 'stickers'].includes(page)) $('#page-body').innerHTML = '<div class="loading-state">正在读取…</div>';
     if (page === 'overview') markup = overviewPage();
     if (page === 'chats') markup = chatsPage();
     if (page === 'roles') markup = rolesPage();
@@ -376,6 +402,7 @@ async function renderPage() {
     if (page === 'connections') { if (!state.reader) state.reader = await api('/api/reader-config'); markup = connectionsPage(); }
     if (page === 'tools') markup = toolsPage();
     if (page === 'extensions') markup = await extensionUI.page();
+    if (page === 'stickers') markup = await stickerManagerUI.page();
     if (page === 'setup') { if (!state.reader) state.reader = await api('/api/reader-config'); markup = setupPage(); }
     if (page === 'sessions') markup = await sessionsPage();
     if (page === 'logs') markup = await logsPage();
@@ -385,6 +412,7 @@ async function renderPage() {
   if (sequence !== renderSequence || state.page !== page) return;
   if(['setup','connections'].includes(page))markup+=`<section class="card process-recovery-card">${header('端口与进程排查','遇到端口占用、其他微信实例或连接失败时，先检查正在运行的进程。','','tool')}<p class="card-description">检查不会停止程序。只有选中具体进程并再次确认后才会停止；随后可重新打开微信或 DSH，再重试配置。</p><button class="button" data-process-recovery>${icon('search')}检查端口与进程</button></section>`;
   $('#page-body').innerHTML = markup; updateDraftUI(); paintStatus(); paintReaderSetup();
+  if(page==='stickers')stickerManagerUI.mount();
   if(page==='behavior')api('/api/sticker-pool').then(pool=>{if(sequence!==renderSequence||!$('#sticker-pool-status'))return;const labels={selected:'DS 已完成评选',waiting_retry:'等待 DS 重试'};$('#sticker-pool-status').textContent='已入池 '+pool.count+'/50 · 待评选 '+(pool.waiting+pool.legacyWaiting)+' · '+(pool.review==='reviewing'?'DS 正在评选':labels[pool.lastReview?.status]??(pool.waiting?'等待 DS 评选':'未满池或没有新候选'));}).catch(()=>{});
   $('#role-content')?.addEventListener('input', event => {
     const role = state.roles.find(r => r.name === state.selectedRole); const content = event.target.value;
@@ -585,6 +613,7 @@ document.addEventListener('click', event => {
   if (button.dataset.browse) return browse(button);
   if (button.dataset.mode) { state.draft.wechat.wake_mode = button.dataset.mode; const selector = state.page === 'overview' ? '#overview-mode' : '#behavior-mode'; $(selector).innerHTML = modeSelector(); updateDraftUI(); return; }
   if (button.dataset.kind) { state.chatKind = button.dataset.kind; renderPage(); return; }
+  if (button.dataset.rebindGroup) return reconnectGroup(button.dataset.rebindGroup);
   if (button.dataset.role) { state.selectedRole = button.dataset.role; renderPage(); return; }
   if (button.dataset.removeId) { state.draft.wechat.whitelist[state.chatKind] = state.draft.wechat.whitelist[state.chatKind].filter(id => String(id) !== button.dataset.removeId); const key = `wechat:${state.chatKind === 'groups' ? 'group' : 'private'}:${button.dataset.removeId}`; delete state.draft.persona.chats?.[key]; renderPage(); updateDraftUI(); return; }
   if (['add-chat', 'empty-add-chat'].includes(button.id)) return addChats();
@@ -637,7 +666,7 @@ if (window.desktop) {
   document.body.classList.add('desktop-mode');
   $('.brand span').textContent = '桌面应用';
   $('.breadcrumb > span:first-of-type').textContent = 'WeChatAgent';
-  $('.version').textContent = '0.3.6 · 关闭窗口收起到托盘';
+  $('.version').textContent = '0.3.7 · 关闭窗口收起到托盘';
   $('#quit-console').textContent = '退出应用';
 }
 document.addEventListener('click', event => { if (document.body.classList.contains('nav-open') && !event.target.closest('.sidebar') && !event.target.closest('#menu-button')) {document.body.classList.remove('nav-open');paintNavigation();} });

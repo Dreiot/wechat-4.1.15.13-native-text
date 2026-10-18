@@ -28,6 +28,7 @@ export class MessageBuffer {
     this.maxPerChat = Math.min(1000, Math.max(10, Number(maxPerChat) || 300));
     this.chats = new Map();
     this.pendingReplies=new Map();
+    this.mediaReplies=new Map();
     this.contextNotices=new Map();
     if (fs.existsSync(file)) {
       const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -50,6 +51,15 @@ export class MessageBuffer {
         if(!item||typeof item.id!=='string'||typeof item.text!=='string'||item.text.length>1000)throw Error('invalid context notice');
         this.contextNotices.set(key,item);
       }
+      for(const [id,item] of Object.entries(saved.mediaReplies??{})){
+        if(!/^[a-f0-9]{64}$/.test(id)||item?.part?.deliveryId!==id||!/^[a-f0-9]{64}$/.test(item.part.stickerId??'')||
+          !['queued','sending','submitted'].includes(item.part.state)||!item.message||
+          buildConversationKey(item.message.platform,item.message.kind,item.message.conversation_id)!==item.key||
+          !['createdAt','expiresAt'].every(name=>Number.isSafeInteger(item[name])&&item[name]>=0)||item.expiresAt<item.createdAt||item.expiresAt-item.createdAt>60000||
+          ['busyAttempts','receiptChecks'].some(name=>item.part[name]!==undefined&&(!Number.isSafeInteger(item.part[name])||item.part[name]<0||item.part[name]>10)))throw Error('invalid media outbox');
+        this.mediaReplies.set(id,item);
+      }
+      if(this.mediaReplies.size>64)throw Error('media outbox limit');
     }
   }
 
@@ -91,6 +101,7 @@ export class MessageBuffer {
     this.#save();
   }
   forgetReply(key){this.pendingReplies.delete(key);this.#save();}
+  saveMedia(){this.#save();}
   setContextNotice(key,item){this.contextNotices.set(key,item);this.#save();}
   recordReplyPart(key,item,outgoing){
     const rows=this.chats.get(key)??[];
@@ -136,7 +147,7 @@ export class MessageBuffer {
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const chats = Object.fromEntries(this.chats);
     const temp = `${this.file}.${process.pid}.tmp`;
-    fs.writeFileSync(temp, JSON.stringify({ version: 1, chats,pendingReplies:Object.fromEntries(this.pendingReplies),contextNotices:Object.fromEntries(this.contextNotices) }), { mode: 0o600 });
+    fs.writeFileSync(temp, JSON.stringify({ version: 1, chats,pendingReplies:Object.fromEntries(this.pendingReplies),mediaReplies:Object.fromEntries(this.mediaReplies),contextNotices:Object.fromEntries(this.contextNotices) }), { mode: 0o600 });
     fs.renameSync(temp, this.file);
   }
 }

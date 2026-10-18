@@ -78,16 +78,17 @@ export class WechatOneBotAdapter extends BaseAdapter {
     const result=await this.server.action('get_sticker_list',{kind,target:String(target),...(typeof query==='string'&&query.trim()?{query:query.slice(0,500)}:{})});
     return result.data?.enabled?(result.data.stickers??[]):[];
   }
-  async sendSticker({kind,target,id,deliveryId,receiptOnly=false}){
+  async sendSticker({kind,target,id,deliveryId,receiptOnly=false,deferReceipt=false,deadlineAt,abandon=false}){
     if(!['private','group'].includes(kind)||!/^[a-f0-9]{64}$/.test(id))throw new TypeError('invalid sticker target');
     let result;
     try{result=await this.server.action(kind==='group'?'send_group_msg':'send_private_msg',{
-      [kind==='group'?'group_id':'user_id']:Number(target),message:[{type:'wechat_sticker',data:{id}}],...(deliveryId?{wechatagent_delivery_id:deliveryId}:{}),...(receiptOnly?{wechatagent_receipt_only:true}:{})});}
+      [kind==='group'?'group_id':'user_id']:Number(target),message:[{type:'wechat_sticker',data:{id}}],...(deliveryId?{wechatagent_delivery_id:deliveryId}:{}),...(receiptOnly?{wechatagent_receipt_only:true}:{}),...(deferReceipt?{wechatagent_defer_receipt:true}:{}),...(abandon?{wechatagent_abandon_delivery:true}:{}),...(deadlineAt!==undefined?{wechatagent_deadline_at:deadlineAt}:{})});}
     catch(error){
       if(error.code!=='STICKER_DELIVERY_UNCONFIRMED'||error.data?.attempted!==true)throw error;
       this.log(`[WeChat] sticker_delivery_unconfirmed operation=${String(deliveryId??'').slice(0,12)}`);
       return {accepted:false,attempted:true,delivered:'unconfirmed',deliveryId};
     }
+    if(abandon&&result.data?.released===true)return result.data;
     if(result.data?.receipt!=='wechat-server-id'||result.data?.media_type!=='wechat-sticker')throw new Error('Sticker send has no server receipt');
     this.stats.sends++;return result;
   }

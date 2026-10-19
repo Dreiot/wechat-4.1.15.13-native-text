@@ -12,7 +12,7 @@ namespace {
 volatile LONG state = 0; // idle, waiting, initializing, ready, failed, cancelled
 volatile LONG cancelled = 0;
 std::mutex logMutex;
-constexpr DWORD waitMs = 30000;
+constexpr DWORD warningMs = 30000;
 DWORD WINAPI Initialize(LPVOID module) {
     // The entry point runs after DllMain returns. Keep this proxy alive while
     // its worker and HTTP handlers are in use; no join occurs under loader lock.
@@ -24,14 +24,17 @@ DWORD WINAPI Initialize(LPVOID module) {
     const auto started = GetTickCount64();
     WeChatAgentInitLog("waiting_for_weixin_dll");
     HMODULE core = nullptr;
+    bool delayed = false;
     while (!InterlockedCompareExchange(&cancelled, 0, 0)) {
         // Acquire a reference as well as checking presence. This call observes
         // the loader's serialization instead of accessing a half-loaded module.
         if (GetModuleHandleExW(0, L"Weixin.dll", &core)) break;
-        if (GetTickCount64() - started >= waitMs) {
-            InterlockedExchange(&state, 4); WeChatAgentInitLog("module_wait_timeout", waitMs); return 0;
+        if (!delayed && GetTickCount64() - started >= warningMs) {
+            // Slow loading must not permanently disable the sender in a live
+            // client. Keep one worker waiting; do not run CustomInit twice.
+            delayed = true; WeChatAgentInitLog("module_wait_delayed", warningMs);
         }
-        Sleep(50);
+        Sleep(delayed ? 250 : 50);
     }
     if (InterlockedCompareExchange(&cancelled, 0, 0)) {
         if (core) FreeLibrary(core);

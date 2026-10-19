@@ -18,7 +18,7 @@ function copy(source, destination) {
   fs.copyFileSync(source, destination);
 }
 for (const name of fs.readdirSync(runtime)) copy(path.join(runtime, name), path.join(output, name === 'electron.exe' ? 'WeChatAgent.exe' : name));
-for (const name of ['package.json', 'main.cjs', 'preload.cjs', 'desktop-policy.cjs', 'deployment.cjs', 'appearance.cjs', 'loading-preload.cjs', 'loading.html', 'loading.css', 'loading.js']) fs.copyFileSync(path.join(root, 'apps/console-desktop', name), path.join(appDir, name));
+for (const name of ['package.json', 'main.cjs', 'preload.cjs', 'shutdown.cjs', 'storage-location.cjs', 'desktop-policy.cjs', 'deployment.cjs', 'appearance.cjs', 'loading-preload.cjs', 'loading.html', 'loading.css', 'loading.js']) fs.copyFileSync(path.join(root, 'apps/console-desktop', name), path.join(appDir, name));
 fs.mkdirSync(path.join(output, 'runtime'), { recursive: true });
 copy(process.execPath, path.join(output, 'runtime', 'node.exe'));
 const nodeLicense = spawnSync(process.execPath, ['--print', 'process.release.name'], { encoding: 'utf8' });

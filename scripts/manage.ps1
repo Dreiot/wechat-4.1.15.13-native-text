@@ -16,6 +16,13 @@ function Test-Port([int]$Port) {
 }
 function Owned-Process($Item,[switch]$AllowStale) {
     if (-not $Item) { return $null }
+    $markerRoot = [IO.Path]::GetFullPath($root).TrimEnd('\','/') + [IO.Path]::DirectorySeparatorChar
+    if (-not $Item.marker -or -not [IO.Path]::IsPathRooted([string]$Item.marker)) { throw 'Cannot verify recorded process marker; refusing to stop it.' }
+    $markerInRoot = [IO.Path]::GetFullPath([string]$Item.marker).StartsWith($markerRoot,[StringComparison]::OrdinalIgnoreCase)
+    if (-not $markerInRoot) {
+        if ($AllowStale) { Write-Host 'Discarded a foreign installation process record; unrelated process was not stopped.'; return $null }
+        throw 'Recorded process belongs to another installation; refusing to stop or reuse it.'
+    }
     $process = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $Item.pid)
     if (-not $process) { return $null }
     if (-not $process.ExecutablePath -or -not $process.CommandLine) { throw 'Cannot verify recorded process identity; refusing to stop it.' }
@@ -26,6 +33,7 @@ function Owned-Process($Item,[switch]$AllowStale) {
     return $process
 }
 function Stop-Services {
+    $stopErrors = [System.Collections.Generic.List[string]]::new()
     $externalWeFlow = $false
     $settingsFile = Join-Path $root 'config\wechatagent.json'
     if (Test-Path -LiteralPath $settingsFile) {
@@ -35,6 +43,7 @@ function Stop-Services {
     foreach ($name in @('adapter','bridge','reader','weflow')) {
         if ($name -eq 'weflow' -and $externalWeFlow) { continue }
         if ($script:record.ContainsKey($name)) {
+          try {
             $item = $script:record[$name]
             if (Owned-Process $item -AllowStale) {
                 $stoppedGracefully = $false
@@ -46,12 +55,22 @@ function Stop-Services {
                         $stoppedGracefully = $true
                     } catch {}
                 }
-                if (-not $stoppedGracefully) { Stop-Process -Id $item.pid -ErrorAction Stop; Wait-Process -Id $item.pid -Timeout 10 -ErrorAction SilentlyContinue }
+                if (-not $stoppedGracefully) {
+                    try { Stop-Process -Id $item.pid -ErrorAction Stop }
+                    catch { if (Owned-Process $item -AllowStale) { throw } }
+                    try { Wait-Process -Id $item.pid -Timeout 10 -ErrorAction Stop }
+                    catch { if (Owned-Process $item -AllowStale) { throw 'Managed process did not stop before the deadline.' } }
+                }
             }
             $script:record.Remove($name); Save-Record
             Write-Output ($name + ' stopped.')
+          } catch {
+            $stopErrors.Add($name)
+            Write-Output ($name + ' could not be stopped; its ownership record was retained.')
+          }
         }
     }
+    if ($stopErrors.Count) { throw ('Managed services could not be stopped: ' + ($stopErrors -join ', ') + '. See state/logs/shutdown.log.') }
 }
 function Start-ServiceProcess([string]$Name,[string]$Exe,[string]$Arguments,[string]$Directory,[string]$Marker,[int]$Port,[bool]$Visible) {
     if (Test-Port $Port) {
@@ -156,7 +175,7 @@ try {
     $env:SOCIAL_DSH_TOKEN = (Get-Content (Join-Path $stateDir 'social-dsh-token.txt') -Raw).Trim()
     $dshUrl = 'http://127.0.0.1:'+$config.ports.dshPlugin+'/health'
     if (-not (Test-Port ([int]$config.ports.dshPlugin)) -and $config.runtime.dshDesktop -and (Test-Path -LiteralPath $config.runtime.dshDesktop)) {
-        Start-Process -FilePath $config.runtime.dshDesktop -WindowStyle Normal | Out-Null
+        & (Join-Path $PSScriptRoot 'launch-dsh.ps1')
         for($i=0;$i -lt 60 -and -not (Test-Port ([int]$config.ports.dshPlugin));$i++){Start-Sleep -Milliseconds 250}
     }
     $health = Invoke-RestMethod $dshUrl -Headers @{Authorization='Bearer '+$env:SOCIAL_DSH_TOKEN} -TimeoutSec 3

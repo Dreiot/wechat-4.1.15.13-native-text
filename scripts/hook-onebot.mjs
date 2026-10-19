@@ -107,6 +107,7 @@ export class HookOneBot {
     this.status.hook_connected = true; this.status.version = native.version ?? '';
     if (native.integration !== 'WeChatAgent-1' || native.backend !== 'wechat-hook') fail('REVIEWED_HOOK_BUILD_REQUIRED');
     if (native.version !== this.hook.expectedVersion || native.version !== '4.1.10.27') fail('HOOK_VERSION_MISMATCH');
+    if (Array.isArray(native.databaseAccounts) && native.databaseAccounts.length === 0) fail('HOOK_LOGIN_REQUIRED');
     if (!Array.isArray(native.databaseAccounts) || native.databaseAccounts.length !== 1 ||
         native.databaseAccounts[0] !== reader.accountDirectory.toLowerCase()) fail('HOOK_ACCOUNT_NOT_READY');
     this.status.hook_account_verified = true;

@@ -4,12 +4,16 @@ const fs = process.versions.electron ? require('original-fs') : require('node:fs
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-async function bootstrapDeployment(resourcesPath, dataHome, progress = () => {}) {
+async function bootstrapDeployment(resourcesPath, dataHome, progress = () => {}, options = {}) {
   const template = path.join(resourcesPath, 'project');
   const manifestFile = path.join(template, 'deployment.json');
   if (!fs.existsSync(manifestFile)) return null;
   const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
   const workspace = path.join(dataHome, 'workspace');
+  const previousDistribution=path.join(workspace,'config/distribution.json');
+  const previousSettings=fs.existsSync(previousDistribution)?JSON.parse(fs.readFileSync(previousDistribution,'utf8').replace(/^\uFEFF/,'')):{};
+  const dshHome=options.dshHome || previousSettings.dshHome || (fs.existsSync(path.join(workspace,'config/wechatagent.json')) ? path.join(require('node:os').homedir(),'.dsh') : path.join(dataHome,'dsh'));
+  const externalDshHome=options.externalDshHome || previousSettings.externalDshHome || process.env.DSH_HOME || path.join(require('node:os').homedir(),'.dsh');
   fs.mkdirSync(workspace, { recursive: true });
   for (const relative of manifest.files) {
     if (path.isAbsolute(relative) || relative.split(/[\\/]/).includes('..') || relative.startsWith('state/') || relative === 'config/wechatagent.json') throw new Error('发行包文件清单无效。');
@@ -75,7 +79,7 @@ async function bootstrapDeployment(resourcesPath, dataHome, progress = () => {})
       fs.writeFileSync(pendingFile,JSON.stringify({...pending,pendingApply:true,dshRestartRequired:true},null,2));
     }
   }
-  fs.writeFileSync(distributionFile, JSON.stringify({ version: manifest.version, buildId:manifest.buildId, runtimeRevision:manifest.runtimeRevision, installed: true, dataHome, python, node, dsh, assets: resourcesPath }, null, 2));
+  fs.writeFileSync(distributionFile, JSON.stringify({ version: manifest.version, buildId:manifest.buildId, runtimeRevision:manifest.runtimeRevision, installed: true, dataHome, python, node, dsh, dshHome, externalDshHome, assets: resourcesPath }, null, 2));
   progress('本机运行环境已准备，正在打开控制台…');
   return { root: workspace, node, python, dataHome, version: manifest.version };
 }

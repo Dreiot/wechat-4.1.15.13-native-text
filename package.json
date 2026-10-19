@@ -1,6 +1,6 @@
 {
   "name": "wechatagent",
-  "version": "0.3.7-fix",
+  "version": "0.3.8",
   "private": true,
   "type": "module",
   "description": "Personal WeChat AI friend with NT reader, WeChat-Hook, OneBot v11 and an existing DSH Desktop",
@@ -28,7 +28,10 @@
     "hook:unpin": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/pin-hook-client.ps1 -Unlock",
     "hook:check": "node scripts/hook-onebot.mjs --check",
     "setup": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/setup.ps1",
-    "privacy:check": "node scripts/public-source-check.mjs"
+    "privacy:check": "node scripts/public-source-check.mjs",
+    "test:shutdown": "node --test scripts/test-desktop-shutdown.mjs scripts/test-desktop-lifecycle.mjs",
+    "test:hook-startup": "node --test scripts/test-hook-startup.mjs scripts/test-hook-launcher.mjs scripts/test-hook-repair-ui.mjs scripts/test-hook-repair-api.mjs scripts/test-process-recovery.mjs",
+    "test:storage": "node --test scripts/test-data-storage.mjs scripts/test-storage-runtime.mjs"
   },
   "devDependencies": {
     "@electron/asar": "3.4.1",

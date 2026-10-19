@@ -67,6 +67,12 @@ function setPath(object, path, value) { const keys = path.split('.'); const last
 const configDirty = () => state.config && JSON.stringify(state.config) !== JSON.stringify(state.draft);
 const readerDirty = () => !!state.readerDraft && (state.readerDraft.dbPath !== (state.reader?.dbPath ?? '') || state.readerDraft.myWxid !== (state.reader?.myWxid ?? '') || !!state.readerDraft.decryptKey);
 const hasDraft = () => configDirty() || state.roleDrafts.size > 0 || readerDirty();
+window.desktop?.onQuitCheck?.(()=>Boolean(hasDraft()||document.querySelector('#chat-settings-form [type=submit]:not(:disabled)')));
+window.desktop?.onShutdownState?.(phase=>{
+  state.shuttingDown=['checking','stopping'].includes(phase);document.body.inert=state.shuttingDown;
+  if(state.shuttingDown){$('#connection-label').innerHTML='<i class="dot"></i><span>正在停止后台服务…</span>';}
+  else if(['idle','failed'].includes(phase)){state.closed=false;void refreshStatus();}
+});
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => { $('#toast').hidden = true; }, 4200); }
 function showError(message) { $('#connection-error').textContent = message; $('#connection-error').hidden = false; }
 function updateDraftUI() {
@@ -138,6 +144,7 @@ function overviewPage() {
   </div>`;
 }
 function paintStatus() {
+  if(state.shuttingDown)return;
   const s = state.status; if (!s) return;
   const busy = state.job?.state === 'running';
   const statusText = busy ? '正在操作' : s.ready ? '机器人运行中' : s.running ? '连接待完成' : '服务未启动';
@@ -365,12 +372,12 @@ function connectionsPage() {
 }
 function toolsPage() {
   const row = (title, help, action, label = '执行') => `<div class="tool-row"><div><h3>${title}</h3><p>${help}</p></div><button class="button" data-action="${action}">${label}</button></div>`;
-  return `<div class="tool-grid"><section class="card">${header('启动与配置', '', '', 'power')}${row('打开匹配微信', '校验并打开已准备的微信，随后在微信中登录。', 'wechat-open', '打开')}${row('准备项目配置', '更新连接配置与 DSH 插件的模型设置。', 'prepare', '准备')}${row('安装项目依赖', '按原安装脚本安装读取器与插件依赖。', 'setup', '安装')}</section><section class="card">${header('连接诊断', '', '', 'plug')}${row('检查数据库读取', '核验当前账号、数据库目录与读取凭据。', 'reader-check', '检查')}${row('检查后台发送', '只检查匹配版本、发送后端与账号是否就绪。', 'hook-check', '检查')}<div class="tool-row"><div><h3>模型或端口更改已处理</h3><p>从 DSH 托盘菜单完全退出并重新打开后，点击确认，然后重启服务。</p></div><button class="button" id="ack-dsh">已重开 DSH</button></div></section><section class="card">${header('发送组件', '', '', 'tool')}${row('构建原生发送组件', '需已有匹配源码和 C++ 构建工具。', 'hook-build', '构建')}</section><section class="card">${header('客户端维护', '', '', 'shield')}${row('开启客户端写保护', '只作用于项目 state/hook 下的客户端目录。', 'hook-pin', '开启')}${row('解除客户端写保护', '恢复原有目录权限；不修改版本适配。', 'hook-unpin', '解除')}<p class="subtle space-top">目录保护不保证旧版微信持续可登录。</p></section></div>`;
+  return `<div class="tool-grid"><section class="card">${header('启动与配置', '', '', 'power')}${row('打开匹配微信', '校验并打开已准备的微信，随后在微信中登录。', 'wechat-open', '打开')}${row('准备项目配置', '更新连接配置与 DSH 插件的模型设置。', 'prepare', '准备')}${row('安装项目依赖', '按原安装脚本安装读取器与插件依赖。', 'setup', '安装')}</section><section class="card">${header('连接诊断', '', '', 'plug')}${row('检查数据库读取', '核验当前账号、数据库目录与读取凭据。', 'reader-check', '检查')}${row('检查后台发送', '只检查匹配版本、发送后端与账号是否就绪。', 'hook-check', '检查')}<div class="tool-row"><div><h3>修复微信连接</h3><p>组件无法初始化时，核对并再次确认后重开匹配微信，可能需要重新登录。</p></div><button class="button" data-repair-wechat>修复…</button></div><div class="tool-row"><div><h3>模型或端口更改已处理</h3><p>从 DSH 托盘菜单完全退出并重新打开后，点击确认，然后重启服务。</p></div><button class="button" id="ack-dsh">已重开 DSH</button></div></section><section class="card">${header('发送组件', '', '', 'tool')}${row('构建原生发送组件', '需已有匹配源码和 C++ 构建工具。', 'hook-build', '构建')}</section><section class="card">${header('客户端维护', '', '', 'shield')}${row('开启客户端写保护', '只作用于项目 state/hook 下的客户端目录。', 'hook-pin', '开启')}${row('解除客户端写保护', '恢复原有目录权限；不修改版本适配。', 'hook-unpin', '解除')}<p class="subtle space-top">目录保护不保证旧版微信持续可登录。</p></section></div>`;
 }
 function setupPage() {
   return `<div class="section-stack"><div class="notice plain">${icon('shield')}<span>此安装包使用独立的本机数据目录。账号、读取凭据和聊天范围需要由你配置，初始聊天范围为空。</span></div><div class="tool-grid">
     <section class="card">${header('检查运行环境', 'Node.js、Python 和读取依赖均已内置。', '', 'check')}<p class="modal-description">不需要安装开发工具或系统 Python。可先检查安装文件是否完整。</p><button class="button" data-action="setup">验证内置环境</button></section>
-    <section class="card">${header('登录匹配微信', '使用安装包准备的独立匹配客户端。', '', 'chat')}<p class="modal-description">打开微信并登录自己的账号，等待消息同步。目前发送组件适配 4.1.10.27；如果微信要求升级，请保留提示并检查兼容性。</p><button class="button" data-action="wechat-open">打开微信</button></section>
+    <section class="card">${header('登录匹配微信', '使用安装包准备的独立匹配客户端。', '', 'chat')}<p class="modal-description">打开微信并登录自己的账号，等待消息同步。目前发送组件适配 4.1.10.27；如果微信要求升级，请保留提示并检查兼容性。</p><button class="button" data-action="wechat-open">打开微信</button> <button class="button" data-repair-wechat>修复微信连接…</button></section>
     <section class="card">${header('连接 DSH', '登录你自己的模型账号，添加本机插件。', '', 'plug')}<p class="modal-description">打开 DSH，在插件页面添加本应用的插件目录。添加并启用后，从托盘完整退出并重新打开 DSH。</p>${pluginPathField()}<div class="button-row space-top"><button class="button" data-action="dsh-open">打开 DSH</button><button class="button" id="open-plugin-folder">打开插件目录</button></div></section>
     </div>${readerConfigurationCard()}<section class="card">${header('启动并选择聊天范围', '数据库显示“已验证”并完成模型连接后，启动服务。', '', 'power')}<p class="modal-description">启动后，在“聊天范围”搜索自己的好友或群聊。添加后保存并重启，助手只会处理允许的聊天。</p><div class="button-row"><button class="button primary" data-action="start">启动服务</button><a class="button" href="#chats">选择聊天范围</a><a class="button" href="#overview">查看连接状态</a></div></section></div>`;
 }
@@ -423,7 +430,7 @@ async function renderPage() {
   $('#log-filter')?.addEventListener('input', event => { const value = event.target.value.toLowerCase(); $('#log-view').textContent = state.logs.content.split('\n').filter(line => line.toLowerCase().includes(value)).join('\n') || '没有匹配的日志。'; });
 }
 async function refreshStatus() {
-  if (state.closed) return;
+  if (state.closed||state.shuttingDown) return;
   try {
     state.status = await api('/api/status'); $('#connection-error').hidden = true; paintStatus();
     if (state.status.activeJob) {
@@ -467,6 +474,8 @@ function paintJob() {
   $('#job-state').textContent = running ? '正在执行 · 可收起此窗口' : job.state === 'succeeded' ? '操作成功' : `操作未完成 · 退出码 ${job.exitCode}`;
   $('#job-retry').hidden = job.state !== 'failed';
   $('#job-recovery').hidden = job.state !== 'failed';
+  $('#job-recovery').textContent = /HOOK_CLIENT_UNHEALTHY|HOOK_INITIALIZATION_TIMEOUT|HOOK_NOT_LISTENING|HOOK_COMPONENT_UPDATE_PENDING|HOOK_AUTH_FAILED/.test(job.output??'') ? '修复微信连接' : '检查占用进程';
+  $('#job-recovery').dataset.hookRepair = String($('#job-recovery').textContent === '修复微信连接');
   $('#activity-button').hidden = false;
   document.querySelectorAll('[data-action]').forEach(button => { button.disabled = running; }); updateDraftUI(); paintStatus(); paintReaderSetup();
 }
@@ -607,6 +616,10 @@ document.addEventListener('change', event => {
 });
 document.addEventListener('click', event => {
   const button = event.target.closest('button'); if (!button) return;
+  if(button.hasAttribute('data-repair-wechat')||button.id==='job-recovery'&&button.dataset.hookRepair==='true'){
+    if(hasDraft())return toast('请先保存或放弃草稿，再修复微信连接。');
+    return openProcessRecovery({api,modal,refreshStatus,toast,repairWeChat:true,onRecovered:async()=>{closeModal();await runAction('wechat-open');}});
+  }
   if(button.matches('[data-process-recovery]')||button.id==='job-recovery')return openProcessRecovery({api,modal,refreshStatus,toast});
   if (button.hasAttribute('data-close')) return closeModal();
   if (button.dataset.action) return runAction(button.dataset.action, button.dataset.key);
@@ -657,8 +670,9 @@ document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('#modal'
 paintNavigation();
 $('#quit-console').addEventListener('click', () => {
   if (hasDraft()) return toast('请先保存或放弃草稿，再退出控制台。');
-  confirmAction(window.desktop ? '退出应用' : '退出控制台', window.desktop ? '退出 WeChatAgent 桌面应用，微信聊天服务继续运行。下次双击 WeChatAgent.exe 即可重新打开。' : '只关闭本机控制台，微信聊天服务继续运行。下次双击控制台入口即可重新打开。', window.desktop ? '退出应用' : '退出控制台', async () => {
-    try { await api('/api/quit', {}); state.closed = true; $('#connection-label').innerHTML = '<i class="dot"></i>控制台已关闭'; $('#page-body').innerHTML = empty('控制台已关闭', '聊天服务继续运行。需要管理时，重新双击 WeChatAgent-Console.vbs。', '', 'power'); }
+  const automatic=window.desktop?.shutdownOnExit===true;
+  confirmAction(automatic ? '退出并停止后台服务' : window.desktop?'退出应用':'退出控制台', automatic ? '退出前会停止本实例的消息读取、自动回复、主动聊天和发送队列。微信和外部 DSH 会继续运行。下次打开应用后可重新启动服务。' : '当前只关闭管理界面，聊天服务继续运行；需要停止时请先手动停止服务。', automatic ? '停止并退出' : window.desktop?'退出应用':'退出控制台', async () => {
+    try { await api('/api/quit', {}); state.closed = true;if(window.desktop){$('#connection-label').innerHTML='<i class="dot"></i><span>'+(automatic?'正在退出并停止后台服务…':'正在退出应用…')+'</span>';return;} $('#connection-label').innerHTML = '<i class="dot"></i>控制台已关闭'; $('#page-body').innerHTML = empty('控制台已关闭', '聊天服务继续运行。需要管理时，重新双击 WeChatAgent-Console.vbs。', '', 'power'); }
     catch (error) { showError(error.message); }
   });
 });
@@ -666,7 +680,7 @@ if (window.desktop) {
   document.body.classList.add('desktop-mode');
   $('.brand span').textContent = '桌面应用';
   $('.breadcrumb > span:first-of-type').textContent = 'WeChatAgent';
-  $('.version').textContent = '0.3.7-fix · 关闭窗口收起到托盘';
+  $('.version').textContent = '0.3.8 · 关闭窗口收起到托盘';
   $('#quit-console').textContent = '退出应用';
 }
 document.addEventListener('click', event => { if (document.body.classList.contains('nav-open') && !event.target.closest('.sidebar') && !event.target.closest('#menu-button')) {document.body.classList.remove('nav-open');paintNavigation();} });

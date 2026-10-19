@@ -49,7 +49,7 @@ function addTree(relative, allow) {
   for (const name of fs.readdirSync(path.join(project, relative), { recursive: true })) if (fs.statSync(path.join(project, relative, name)).isFile()) files.push((relative + '/' + name).replaceAll('\\', '/'));
 }
 
-for (const name of ['package.json','main.cjs','preload.cjs','desktop-policy.cjs','deployment.cjs','appearance.cjs', 'loading-preload.cjs','loading.html','loading.css','loading.js']) copyFile(path.join(root, 'apps/console-desktop', name), path.join(appDir, name));
+for (const name of ['package.json','main.cjs','preload.cjs','shutdown.cjs','storage-location.cjs', 'desktop-policy.cjs','deployment.cjs','appearance.cjs', 'loading-preload.cjs','loading.html','loading.css','loading.js']) copyFile(path.join(root, 'apps/console-desktop', name), path.join(appDir, name));
 fs.writeFileSync(path.join(appDir, 'package.json'), JSON.stringify({ name: 'wechatagent', productName: 'WeChatAgent', version, description: 'WeChatAgent desktop console', main: 'main.cjs', author: 'WeChatAgent contributors', license: 'SEE THIRD-PARTY-NOTICES.txt' }, null, 2));
 await buildIcons(root, appDir, require('sharp'));
 for (const name of ['LICENSE','LICENSES.md']) add(name);
@@ -61,6 +61,11 @@ for (const name of presetNames) add('roles/' + name);
 addTree('public/console');
 add('scripts/wechat_sticker_manager.py');
 add('docs/STICKER_MANAGER.md');
+add('docs/EXIT_SHUTDOWN.md');
+add('docs/DATA_STORAGE.md');
+add('docs/HOOK_STARTUP_RECOVERY.md');
+add('scripts/hook-client-health.ps1');
+add('scripts/stop-legacy-services.ps1');
 const scriptNames = ['project-config.mjs','extension-status.mjs','bundled-extensions.mjs','update-check.mjs','migrate-io-config.mjs','manage.ps1','console-server.mjs','console-process.mjs','console-powershell.ps1','console-native.ps1','sync-weflow.cjs','hook-onebot.mjs','reader-api.py','reader-requirements.txt','wechat_media.py','wechat_sticker.py','wechat_sticker_send.py','wechat_forwarded.py','resolve-wechat-image.py','list-friend-ids.mjs','manage-dsh-sessions.mjs','launch-hook-wechat.ps1','pin-hook-client.ps1','launch-dsh.ps1','check-runtime.ps1','setup.ps1','build-hook.ps1'];
 for (const name of [...scriptNames, 'wechat_group_bindings.py', 'dsh-configuration.mjs', 'process-recovery.mjs', 'process-recovery.ps1', 'check-runtime.py', 'wechat_meme_library.py', 'wechat_sticker_labels.py', 'wechat_image_normalize.py', 'wechat_sticker_collection.py', 'wechat_quote.py', 'text-delivery-store.mjs', 'reader-setup.mjs', 'reader_setup.py', 'reader-account-state.mjs']) add('scripts/' + name);
 addTree('scripts/native-hook');
@@ -114,6 +119,11 @@ const originalFolderLookup = /      System::Store S[\s\S]*?      System::Store L
 if (!originalFolderLookup.test(multiUser)) throw new Error('NSIS per-user path template differs; inspect before building.');
 multiUser = multiUser.replace(originalFolderLookup, '      # Current-user LocalAppData avoids the old System::Store memory fault.\n');
 fs.writeFileSync(path.join(customNsis, 'multiUser.nsh'), multiUser);
+const assistedFile=path.join(customNsis,'assistedInstaller.nsh');
+const assisted=fs.readFileSync(assistedFile,'utf8');
+const directoryPrepare=/    Function instFilesPre[\s\S]*?    FunctionEnd/;
+if(!directoryPrepare.test(assisted))throw new Error('NSIS directory page template differs; inspect before building.');
+fs.writeFileSync(assistedFile,assisted.replace('    !include StrContains.nsh','    # Directory layout is selected by installer-storage.nsh.').replace(directoryPrepare,'    Function instFilesPre\n      # installer-storage.nsh already selected the app subdirectory.\n    FunctionEnd'));
 // User data is outside the install directory and deleteAppDataOnUninstall is
 // false. Standard removal avoids the legacy uninstaller's atomic rename,
 // which fails across drives and on long bundled LibreOffice file paths.
@@ -143,7 +153,7 @@ await build({ targets:Platform.WINDOWS.createTarget('nsis', Arch.x64), config: {
   afterPack: async context => embedExecutableIcon(path.join(context.appOutDir, 'WeChatAgent.exe'), path.join(appDir, 'icon.ico'), require('resedit')),
   extraResources:[{from:project,to:'project'},{from:path.join(stage,'runtime'),to:'runtime',filter:['**/*','!**/__pycache__/**','!**/*.pyc']},{from:vendor,to:'vendor'}],
   win:{target:['nsis'], icon:path.join(appDir,'icon.ico'), signAndEditExecutable:false, requestedExecutionLevel:'asInvoker'},
-  nsis:{installerIcon:path.join(appDir,'icon.ico'), uninstallerIcon:path.join(appDir,'icon.ico'), oneClick:false, perMachine:false, allowElevation:false, allowToChangeInstallationDirectory:true, createDesktopShortcut:true, createStartMenuShortcut:true, deleteAppDataOnUninstall:false, differentialPackage:false, runAfterFinish:false, installerLanguages:['zh_CN','en_US'], language:'2052', license:path.join(appDir,'LICENSE.txt')},
+  nsis:{include:path.join(root,'apps/console-desktop/installer-storage.nsh'),installerIcon:path.join(appDir,'icon.ico'), uninstallerIcon:path.join(appDir,'icon.ico'), oneClick:false, perMachine:false, allowElevation:false, allowToChangeInstallationDirectory:true, createDesktopShortcut:true, createStartMenuShortcut:true, deleteAppDataOnUninstall:false, differentialPackage:false, runAfterFinish:false, installerLanguages:['zh_CN','en_US'], language:'2052', license:path.join(appDir,'LICENSE.txt')},
   compression:'normal', publish:null,
 } });
 console.log('Installer built in release/installer');

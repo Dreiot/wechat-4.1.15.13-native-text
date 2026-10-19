@@ -11,6 +11,7 @@ if ((Get-Item -LiteralPath $exe).VersionInfo.FileVersion -ne $config.hook.expect
 $signature = Get-AuthenticodeSignature -LiteralPath $exe
 if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Tencent') { throw 'WeChat executable signature check failed.' }
 $directory = Split-Path -Parent $exe
+. (Join-Path $PSScriptRoot 'hook-client-health.ps1')
 $existing = @(Get-CimInstance Win32_Process -Filter "Name='Weixin.exe'" | Where-Object { $_.CommandLine -notmatch '--type=|--crashpad-handler' })
 $ours = @($existing | Where-Object ExecutablePath -eq $exe)
 if ($ours.Count) {
@@ -18,7 +19,9 @@ if ($ours.Count) {
     $currentBuild = Get-Content -LiteralPath (Join-Path $root 'state\hook\native\build.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $installedDll = Join-Path $directory 'version.dll'
     if (-not (Test-Path -LiteralPath $installedDll) -or (Get-FileHash -LiteralPath $installedDll -Algorithm SHA256).Hash.ToLowerInvariant() -ne $currentBuild.sha256) { throw 'HOOK_COMPONENT_UPDATE_PENDING: Exit the matching WeChat from its tray before reopening it to apply the updated sender.' }
-    Write-Output 'Matching WeChat is already open. Log in there, then start WeChatAgent.'; exit 0
+    Write-Output 'Matching WeChat is open; checking its sender initialization...'
+    Wait-HookClient $exe $config.hook.baseUrl $config.hook.expectedVersion (Join-Path $root 'state\hook\native-token.txt')
+    Write-Output 'Matching WeChat sender is ready. Finish login, then start WeChatAgent.'; exit 0
 }
 $native = Join-Path $root 'state\hook\native'
 $build = Get-Content -LiteralPath (Join-Path $native 'build.json') -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -42,10 +45,6 @@ if ($existing.Count) { throw 'Another desktop WeChat is running. Exit it from th
 $port = ([Uri]$config.hook.baseUrl).Port
 if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) { throw 'Hook port is already in use; inspect the listener before launching.' }
 $clientProcess = Start-Process -FilePath $exe -ArgumentList ('StartPort='+$port+' CallBackURL="http://127.0.0.1:'+ $config.ports.adapter + '/unused"') -WorkingDirectory $directory -WindowStyle Normal -PassThru
-Start-Sleep -Seconds 2
-$clientProcess.Refresh()
-if ($clientProcess.HasExited) {
-    $replacement = @(Get-CimInstance Win32_Process -Filter "Name='Weixin.exe'" | Where-Object { $_.ExecutablePath -eq $exe -and $_.CommandLine -notmatch '--type=|--crashpad-handler' })
-    if (-not $replacement.Count) { throw 'WECHAT_LAUNCH_EXITED: The matching client exited after launch. If WeChat requests an upgrade, this fixed-version sender needs a compatible client adaptation.' }
-}
-Write-Output ('Opened matching WeChat '+$config.hook.expectedVersion+'. Log in, then start WeChatAgent.cmd.')
+Write-Output 'Waiting for matching WeChat launcher handoff and sender initialization...'
+Wait-HookClient $exe $config.hook.baseUrl $config.hook.expectedVersion (Join-Path $root 'state\hook\native-token.txt')
+Write-Output ('Opened matching WeChat '+$config.hook.expectedVersion+'; sender is ready. Log in, then start WeChatAgent.cmd.')

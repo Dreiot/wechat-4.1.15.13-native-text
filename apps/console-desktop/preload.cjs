@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 const initial = ipcRenderer.sendSync('desktop:initial');
 contextBridge.exposeInMainWorld('desktop', {
+  shutdownOnExit: true,
   initialTheme: initial.theme,
   initialAppearance: initial.appearance,
   chooseBackground: () => ipcRenderer.invoke('desktop:appearance-choose'),
@@ -11,4 +12,6 @@ contextBridge.exposeInMainWorld('desktop', {
   copyPluginPath: () => ipcRenderer.invoke('desktop:plugin-path'),
   openPluginFolder: () => ipcRenderer.invoke('desktop:plugin-folder'),
   openExternal: url => ipcRenderer.invoke('desktop:open-external', url),
+  onQuitCheck: callback => {if(typeof callback==='function')ipcRenderer.on('desktop:check-unsaved',(_event,id)=>ipcRenderer.send('desktop:unsaved-answer',id,Boolean(callback())));},
+  onShutdownState: callback => {if(typeof callback==='function')ipcRenderer.on('desktop:shutdown-state',(_event,state)=>callback(state));},
 });

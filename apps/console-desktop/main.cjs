@@ -5,26 +5,56 @@ const { pathToFileURL } = require('node:url');
 const { projectDirectory, safeNavigation, externalWebUrl, windowPlacement } = require('./desktop-policy.cjs');
 const { bootstrapDeployment } = require('./deployment.cjs');
 const { createAppearanceStore, strengthOf } = require('./appearance.cjs');
+const {createShutdownController}=require('./shutdown.cjs');
+const {resolveStorageLocation,migrationPlan,prepareDataHome,rebindExternalDsh,stopLegacyServices}=require('./storage-location.cjs');
 
 app.setName('WeChatAgent');
 app.setAppUserModelId('local.wechatagent.desktop');
 const installedDistribution = app.isPackaged && fs.existsSync(path.join(process.resourcesPath, 'project', 'deployment.json'));
-const deploymentHome = process.env.WECHATAGENT_TEST_DATA_HOME || path.join(app.getPath('appData'), 'WeChatAgent');
+const legacyHome=path.join(app.getPath('appData'),'WeChatAgent');
+let storage=null,storageFailure=null;
+try{if(installedDistribution)storage=resolveStorageLocation({appDir:path.dirname(process.resourcesPath),legacyHome,override:process.env.WECHATAGENT_TEST_DATA_HOME});}catch(error){storageFailure=error;}
+const deploymentHome = storage?.dataHome || process.env.WECHATAGENT_TEST_DATA_HOME || legacyHome;
 let deployment = null;
 const root = installedDistribution ? path.join(deploymentHome, 'workspace') : projectDirectory(process.resourcesPath, __dirname, app.isPackaged);
-const dataDirectory = path.join(root, 'state', 'desktop');
-fs.mkdirSync(dataDirectory, { recursive: true });
+let dataDirectory = installedDistribution ? path.join(deploymentHome,'desktop') : path.join(root, 'state', 'desktop');
+try{if(storageFailure)throw storageFailure;fs.mkdirSync(dataDirectory,{recursive:true});}catch(error){storageFailure=Error('无法使用所选数据位置，请确认磁盘已连接且目录可写。\n'+error.message);dataDirectory=path.join(require('node:os').tmpdir(),'WeChatAgent-startup-'+process.pid);fs.mkdirSync(dataDirectory,{recursive:true});}
 app.setPath('userData', dataDirectory);
 app.setPath('sessionData', path.join(dataDirectory, 'session'));
 const preferenceFile = path.join(dataDirectory, 'window.json');
 let preferences = {};
 try { preferences = JSON.parse(fs.readFileSync(preferenceFile, 'utf8')); } catch {}
 const appearanceStore = createAppearanceStore(dataDirectory, nativeImage);
-let window, tray, consoleApp, origin; let quitting = false;
+let window, tray, consoleApp, origin; let quitting = false, quitApproved=false, quitCheck=null;
 const savePreferences = () => {
   const temp = preferenceFile + '.tmp'; fs.writeFileSync(temp, JSON.stringify(preferences, null, 2)); fs.renameSync(temp, preferenceFile);
 };
 const bringForward = () => { if (window && !window.isDestroyed()) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } };
+function queryUnsavedChanges() {
+  if(!window||window.isDestroyed()||window.webContents.isDestroyed())return Promise.resolve(false);
+  return new Promise(resolve=>{
+    const id=require('node:crypto').randomUUID();
+    const answer=value=>{if(quitCheck?.id!==id)return;clearTimeout(quitCheck.timer);quitCheck=null;resolve(value);};
+    quitCheck={id,answer,timer:setTimeout(()=>answer(true),2000)};
+    try{window.webContents.send('desktop:check-unsaved',id);}catch{answer(true);}
+  });
+}
+const shutdown=createShutdownController({
+  confirm:async()=>{
+    if(await queryUnsavedChanges()){
+      const response=dialog.showMessageBoxSync(window,{type:'question',title:'有未保存的设置',message:'退出会放弃未保存的更改，并停止本实例的后台服务。',buttons:['继续编辑','放弃更改并退出'],defaultId:0,cancelId:0});
+      if(response!==1)return false;
+    }
+    quitApproved=true;return true;
+  },
+  stop:async()=>{if(consoleApp)await consoleApp.shutdown();},
+  finish:()=>{quitting=true;app.quit();},
+  onState:state=>{
+    if(window&&!window.isDestroyed()&&!window.webContents.isDestroyed())window.webContents.send('desktop:shutdown-state',state);
+    if(tray&&!tray.isDestroyed())tray.setToolTip(state==='stopping'?'WeChatAgent · 正在停止后台服务':'WeChatAgent');
+  },
+  onError:error=>{quitApproved=false;quitting=false;bringForward();dialog.showErrorBox('退出未完成',error.message+'\n程序已保留，请检查运行日志后重试。');},
+});
 
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
@@ -32,12 +62,23 @@ else {
   app.on('activate', bringForward);
   Menu.setApplicationMenu(null);
   app.whenReady().then(async () => {
+    if(storageFailure)throw storageFailure;
     let loadingWindow;
     if (installedDistribution) {
       loadingWindow = new BrowserWindow({ width:480, height:280, resizable:false, title:'WeChatAgent', icon:path.join(__dirname,'icon.png'), backgroundColor:'#f3f5f4', webPreferences:{preload:path.join(__dirname,'loading-preload.cjs'),contextIsolation:true,sandbox:true,nodeIntegration:false} });
       loadingWindow.setMenu(null);
       await loadingWindow.loadFile(path.join(__dirname,'loading.html'));
-      deployment = await bootstrapDeployment(process.resourcesPath, deploymentHome, message => { if (!loadingWindow.isDestroyed()) loadingWindow.webContents.send('deployment:progress', message); });
+      const progress=message=>{if(!loadingWindow.isDestroyed())loadingWindow.webContents.send('deployment:progress',message);};
+      const plan=migrationPlan(storage);
+      if(plan.needed){
+        const answer=dialog.showMessageBoxSync(loadingWindow,{type:'question',title:'迁移旧版数据',message:'发现已有的 WeChatAgent 数据',detail:'从：'+plan.source+'\n到：'+plan.dataHome+'\n\n会停止旧实例管理的后台服务，再复制并校验配置、人设、表情包和会话状态，保留旧副本。请先退出旧版窗口、匹配微信和 DSH。',buttons:['停止旧服务并迁移','暂不启动'],defaultId:0,cancelId:1});
+        if(answer!==0){quitting=true;app.quit();return;}
+        progress('正在停止旧实例管理的后台服务…');await stopLegacyServices(plan,process.resourcesPath);
+      }
+      const migrated=await prepareDataHome(plan,{progress});
+      deployment = await bootstrapDeployment(process.resourcesPath, deploymentHome, progress, {dshHome:migrated.report?.source?path.join(deploymentHome,'dsh'):undefined,externalDshHome:migrated.report?.managedDsh===false?migrated.report.oldDshHome:undefined});
+      await rebindExternalDsh(migrated.report,root,deploymentHome);
+      try{preferences=fs.existsSync(preferenceFile)?JSON.parse(fs.readFileSync(preferenceFile,'utf8')):{};}catch{preferences={};}
     }
     const runtimeNode = deployment?.node ?? (app.isPackaged ? path.join(process.resourcesPath, '..', 'runtime', 'node.exe') : process.env.WECHATAGENT_NODE_EXECUTABLE);
     if (!runtimeNode || !fs.existsSync(runtimeNode)) throw new Error('找不到桌面应用的 Node.js 运行环境，请重新构建应用。');
@@ -69,6 +110,7 @@ else {
       webPreferences: { preload: path.join(__dirname, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true, devTools: false, spellcheck: false },
     });
     const trusted = event => event.sender === window.webContents && safeNavigation(event.senderFrame?.url ?? '', origin);
+    ipcMain.on('desktop:unsaved-answer',(event,id,value)=>{if(trusted(event)&&quitCheck?.id===id&&typeof value==='boolean')quitCheck.answer(value);});
     ipcMain.on('desktop:initial', event => { event.returnValue = event.sender === window.webContents ? { theme: preferences.theme ?? theme, appearance:appearanceStore.read(preferences.appearance) } : {}; });
     ipcMain.handle('desktop:appearance-choose', async event => {
       if (!trusted(event)) throw new Error('不允许此窗口修改背景。');
@@ -123,6 +165,7 @@ else {
     window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     window.webContents.session.setPermissionCheckHandler(() => false);
     window.webContents.on('will-prevent-unload', event => {
+      if(quitApproved&&shutdown.finished){event.preventDefault();return;}
       const response = dialog.showMessageBoxSync(window, { type: 'question', title: '有未保存的设置', message: '退出会放弃未保存的更改。', buttons: ['继续编辑', '放弃更改并退出'], defaultId: 0, cancelId: 0 });
       if (response === 1) event.preventDefault(); else quitting = false;
     });
@@ -142,12 +185,19 @@ else {
     dialog.showErrorBox('WeChatAgent 启动失败', error.message); quitting = true; app.quit();
   });
   app.on('before-quit', event => {
+    if(shutdown.finished||!consoleApp){quitting=true;return;}
+    event.preventDefault();quitting=false;
+    if(shutdown.running)return;
     if (consoleApp?.isBusy()) {
       event.preventDefault(); quitting = false; bringForward();
       dialog.showMessageBox(window, { type: 'info', title: '操作正在进行', message: '请等待当前操作完成后再退出应用。', buttons: ['知道了'] });
       return;
     }
-    quitting = true;
+    void shutdown.request();
   });
-  app.on('will-quit', () => { if (tray) tray.destroy(); consoleApp?.close(); });
+  app.on('will-quit', () => {
+    if (tray) tray.destroy(); consoleApp?.close();
+    const runtimeFile=path.join(dataDirectory,'runtime.json');
+    try{if(JSON.parse(fs.readFileSync(runtimeFile,'utf8')).pid===process.pid)fs.unlinkSync(runtimeFile);}catch{}
+  });
 }

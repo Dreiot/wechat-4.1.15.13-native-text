@@ -17,11 +17,11 @@ const publicItem=item=>({id:item.id,pid:item.pid,name:item.name,path:item.path,p
 export function createProcessRecovery({root,probe=request=>helper(root,'Inspect',request),stop=request=>helper(root,'Stop',request),now=Date.now,ttlMs=120000}={}) {
   const scans=new Map(),confirmations=new Map();let busy=false;
   const prune=()=>{for(const map of [scans,confirmations])for(const [id,value] of map)if(value.expiresAt<=now())map.delete(id);};
-  const request=(config,healthyPorts,includeMatchingWeChat)=>({root,ports:[...Object.values(config.ports),Number(new URL(config.hook.baseUrl).port||80)].filter(port=>!healthyPorts.includes(port)),wechatExecutable:path.resolve(root,config.hook.wechatExecutable),protectedPids:[process.pid],includeMatchingWeChat});
+  const request=(config,healthyPorts,includeMatchingWeChat,matchingWeChatOnly)=>({root,ports:matchingWeChatOnly?[]:[...Object.values(config.ports),Number(new URL(config.hook.baseUrl).port||80)].filter(port=>!healthyPorts.includes(port)),wechatExecutable:path.resolve(root,config.hook.wechatExecutable),protectedPids:[process.pid],includeMatchingWeChat,matchingWeChatOnly});
   return {
-    async scan(config,revision,{healthyPorts=[],includeMatchingWeChat=false}={}) {
-      prune();const input=request(config,healthyPorts,includeMatchingWeChat),result=await probe(input);
-      const items=(Array.isArray(result)?result:result.items??[]).slice(0,32).map(item=>({...item,id:crypto.randomUUID()}));
+    async scan(config,revision,{healthyPorts=[],includeMatchingWeChat=false,matchingWeChatOnly=false}={}) {
+      prune();const input=request(config,healthyPorts,includeMatchingWeChat,matchingWeChatOnly),result=await probe(input);
+      const items=(Array.isArray(result)?result:result.items??[]).filter(item=>!matchingWeChatOnly||path.resolve(item.path??'').toLowerCase()===input.wechatExecutable.toLowerCase()).slice(0,32).map(item=>({...item,id:crypto.randomUUID()}));
       const id=crypto.randomUUID(),scan={revision,input,items,expiresAt:now()+ttlMs};scans.set(id,scan);
       while(scans.size>4)scans.delete(scans.keys().next().value);
       return {scanId:id,expiresAt:scan.expiresAt,items:items.map(publicItem)};

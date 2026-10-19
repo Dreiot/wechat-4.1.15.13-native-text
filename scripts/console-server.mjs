@@ -89,6 +89,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
   const csrf = crypto.randomBytes(32).toString('hex');
   const jobs = new Map(); let activeJob = null; let latestJob = null; let protectingCredential = false;
   let processRecoveryBusy=false;
+  let shutdownPromise=null,shuttingDown=false;
   const processRecovery=createProcessRecovery({root,probe:processProbe,stop:processStop});
   let statusPromise; let statusTime = 0;
   const snapshot = () => {
@@ -116,7 +117,18 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     atomic(preferenceFile, { ...previous, pendingApply: true, dshRestartRequired: previous.dshRestartRequired || dsh });
     statusTime = 0;
   };
-  const assertIdle = () => { if (activeJob || protectingCredential || processRecoveryBusy) throw fault('有操作正在进行，请等它完成后再保存或执行其他操作。', 409); };
+  const assertIdle = () => { if(shuttingDown)throw fault('正在退出并停止后台服务，请等待操作完成。',409);if (activeJob || protectingCredential || processRecoveryBusy) throw fault('有操作正在进行，请等它完成后再保存或执行其他操作。', 409); };
+  function shutdown() {
+    if(shutdownPromise)return shutdownPromise;
+    assertIdle();shuttingDown=true;let output='';
+    shutdownPromise=Promise.resolve().then(()=>execute({...command('stop'),timeoutMs:70000},chunk=>{output=safeText(output+chunk.toString()).slice(-12000);})).then(code=>{
+      const logDir=path.join(root,'state','logs');fs.mkdirSync(logDir,{recursive:true});
+      fs.writeFileSync(path.join(logDir,'shutdown.log'),new Date().toISOString()+'\n'+output+'\nexit='+code+'\n');
+      if(code!==0)throw fault('后台服务未能全部停止。请查看运行日志 shutdown.log 后重试退出。',503);
+      statusTime=0;return {ok:true};
+    }).catch(error=>{shuttingDown=false;shutdownPromise=null;throw error;});
+    return shutdownPromise;
+  }
   async function remote(url, token, timeout = 2200) {
     const response = await fetchImpl(url, { headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: AbortSignal.timeout(timeout) });
     if (!response.ok) throw fault('连接服务暂不可用。请检查服务是否启动。', 503);
@@ -200,7 +212,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     if (['start', 'stop', 'restart', 'prepare'].includes(action)) return ps('manage.ps1', action);
     if (action === 'setup') return ps(fs.existsSync(path.join(root, 'config', 'distribution.json')) ? 'check-runtime.ps1' : 'setup.ps1');
     if (action === 'dsh-open') return ps('launch-dsh.ps1');
-    if (action === 'wechat-open') return ps('launch-hook-wechat.ps1', ...(fs.existsSync(path.join(root,'config/distribution.json')) && fs.existsSync(path.join(root,'state/hook/native/build.previous.json')) ? ['-UpdateHook'] : []));
+    if (action === 'wechat-open') return ps('launch-hook-wechat.ps1', ...(fs.existsSync(path.join(root,'state/hook/native/build.previous.json')) ? ['-UpdateHook'] : []));
     if (action === 'hook-build') return ps('build-hook.ps1');
     if (action === 'hook-pin') return ps('pin-hook-client.ps1');
     if (action === 'hook-unpin') return ps('pin-hook-client.ps1', '-Unlock');
@@ -360,12 +372,14 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       }
       if (req.method === 'GET' && route === '/api/status') return reply(200, await getStatus());
       if(req.method==='GET' && route==='/api/process-recovery'){
-        assertIdle();const status=await getStatus(),config=snapshot();
+        assertIdle();const config=snapshot();
+        if(url.searchParams.get('purpose')==='hook-repair')return reply(200,{...await processRecovery.scan(config.config,config.revision,{includeMatchingWeChat:true,matchingWeChatOnly:true}),purpose:'hook-repair'});
+        const status=await getStatus();
         const healthyPorts=[];
         if(status.services.find(service=>service.id==='reader')?.ready)healthyPorts.push(config.config.ports.weflow);
         if(status.services.find(service=>service.id==='bridge')?.ready)healthyPorts.push(config.config.ports.onebot,config.config.ports.adapter,Number(new URL(config.config.hook.baseUrl).port||80));
         if(status.services.find(service=>service.id==='dsh')?.ready)healthyPorts.push(config.config.ports.dshPlugin);
-        return reply(200,await processRecovery.scan(config.config,config.revision,{healthyPorts,includeMatchingWeChat:/HOOK_COMPONENT_UPDATE_PENDING/.test(jobs.get(latestJob)?.output??'')}));
+        return reply(200,await processRecovery.scan(config.config,config.revision,{healthyPorts,includeMatchingWeChat:/HOOK_COMPONENT_UPDATE_PENDING|HOOK_CLIENT_UNHEALTHY|HOOK_INITIALIZATION_TIMEOUT|HOOK_NOT_LISTENING/.test(jobs.get(latestJob)?.output??'')}));
       }
 
       if (req.method === 'GET' && route === '/api/roles') {
@@ -527,7 +541,20 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     }
   });
   server.requestTimeout = 180000;
-  return { server, isBusy: () => !!activeJob || protectingCredential || processRecoveryBusy, close: () => { server.closeAllConnections(); server.close(); }, start: () => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => resolve(server.address())); }) };
+  const start=()=>new Promise((resolve,reject)=>{
+    let attempts=0;
+    const listen=()=>{
+      attempts++;
+      const ready=()=>{server.removeListener('error',failed);resolve(server.address());};
+      const failed=error=>{server.removeListener('listening',ready);if(port===0&&attempts<16&&['EADDRINUSE','EACCES'].includes(error.code)){listen();return;}reject(error);};
+      server.once('error',failed);
+      server.once('listening',ready);
+      // Windows port 0 can choose a browser-blocked service port (e.g. 6667).
+      server.listen(port===0?crypto.randomInt(20000,60000):port,'127.0.0.1');
+    };
+    listen();
+  });
+  return { server, shutdown, isBusy: () => shuttingDown || !!activeJob || protectingCredential || processRecoveryBusy, close: () => { server.closeAllConnections(); server.close(); }, start };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -136,6 +136,7 @@ process.env.CSC_IDENTITY_AUTO_DISCOVERY = 'false';
 process.env.ELECTRON_BUILDER_COMPRESSION_LEVEL ??= '1';
 await build({ targets:Platform.WINDOWS.createTarget('nsis', Arch.x64), config: {
   appId:'local.wechatagent.desktop', productName:'WeChatAgent', artifactName:'WeChatAgent-Setup-${version}-${arch}.${ext}',
+  buildVersion:version.endsWith('-fix')?version.replace(/-fix$/,'.1'):undefined,
   directories:{app:appDir, output:path.join(root,'release','installer'), buildResources:appDir},
   electronDist:path.join(root,'node_modules/electron/dist'), electronVersion:'41.1.1',
   asar:false, npmRebuild:false, buildDependenciesFromSource:false, files:['**/*'],

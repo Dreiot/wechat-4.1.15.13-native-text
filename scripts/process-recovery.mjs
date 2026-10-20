@@ -13,6 +13,13 @@ async function helper(root,mode,request) {
 }
 const fingerprint=item=>JSON.stringify([item.pid,item.start,item.path?.toLowerCase(),item.commandHash,[...(item.ports??[])].sort()]);
 const publicItem=item=>({id:item.id,pid:item.pid,name:item.name,path:item.path,ports:item.ports??[],reason:item.reason,canStop:item.canStop===true,blockedReason:item.blockedReason??''});
+export function startupConflictPorts(output,allowedPorts){
+  const allowed=new Set(allowedPorts),ports=new Set();
+  for(const line of String(output??'').split(/\r?\n/))if(/ADAPTER_PORT_(?:IN_USE|DENIED)|SERVICE_PORT_(?:IN_USE|DENIED|OWNER_MISMATCH)|ADAPTER_IDENTITY_MISMATCH/.test(line)){
+    const port=Number(/\bport=(\d{1,5})\b/.exec(line)?.[1]);if(allowed.has(port))ports.add(port);
+  }
+  return [...ports];
+}
 
 export function createProcessRecovery({root,probe=request=>helper(root,'Inspect',request),stop=request=>helper(root,'Stop',request),now=Date.now,ttlMs=120000}={}) {
   const scans=new Map(),confirmations=new Map();let busy=false;

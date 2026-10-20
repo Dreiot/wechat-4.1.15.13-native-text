@@ -93,7 +93,7 @@ else {
     consoleApp = createConsole({ root, port: 0, nodeExecutable: runtimeNode,
       onQuit: () => app.quit(),
       filePicker: async kind => {
-        const result = await dialog.showOpenDialog(window, { title: kind === 'folder' ? '选择微信数据库目录' : '选择程序', properties: kind === 'folder' ? ['openDirectory'] : ['openFile'], ...(kind === 'exe' ? { filters: [{ name: '程序', extensions: ['exe'] }] } : {}) });
+        const result = await dialog.showOpenDialog(window, { title: kind === 'workspace' ? '选择工作区目录' : kind === 'folder' ? '选择微信数据库目录' : '选择程序', properties: ['folder','workspace'].includes(kind) ? ['openDirectory'] : ['openFile'], ...(kind === 'exe' ? { filters: [{ name: '程序', extensions: ['exe'] }] } : {}) });
         return result.canceled ? '' : result.filePaths[0];
       },
     });

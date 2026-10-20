@@ -44,6 +44,17 @@ export function runConsoleCommand(spec, onOutput, { cwd, env = process.env, time
 }
 
 export function taskFailureMessage(output, code) {
+  if (/DSH_NOT_CONFIGURED/.test(output)) return '请先在“首次配置”点击“下载安装 DSH”，安装后选择 DSH 程序位置并保存设置。';
+  if (/DSH_PLUGIN_NOT_READY/.test(output)) return 'DSH 插件尚未就绪，请在 DSH 添加并启用本机插件，再从托盘完整退出并重新打开 DSH。';
+  const port=/\bport=(\d{1,5})\b/.exec(output)?.[1],portLabel=port?'端口 '+port:'配置端口';
+  if (/ADAPTER_PORT_IN_USE|SERVICE_PORT_IN_USE|SERVICE_PORT_OWNER_MISMATCH/.test(output)) return portLabel+' 已被其他进程占用或绑定。点击“检查占用进程”，核对路径和 PID，经再次确认后处理；也可在连接设置中修改端口。';
+  if (/ADAPTER_PORT_DENIED|SERVICE_PORT_DENIED/.test(output)) return 'Windows 拒绝绑定'+portLabel+'，可能涉及系统保留端口或访问限制。请在连接设置中更换该端口再重试；没有监听进程也可能无法使用。';
+  if (/SERVICE_PORT_INSPECTION_FAILED/.test(output)) return '无法核对'+portLabel+'的进程归属，启动已停止。请完整退出并重新打开应用，仍失败时查看启动日志。';
+  if (/ADAPTER_IDENTITY_MISMATCH/.test(output)) return portLabel+'未返回本实例的适配器身份，可能仍在运行旧版服务。请先重启本实例服务；持续冲突时检查占用进程。';
+  if (/READER_NOT_LISTENING|READER_HEALTH_TIMEOUT|READER_CONNECTION_RESET|READER_HEALTH_INVALID_RESPONSE|READER_HEALTH_FAILED/.test(output)) return '适配器无法连接微信读取服务（'+portLabel+'）。请查看 reader.stderr.log 中的状态，并停止后重新启动助手服务；这一步尚未确认微信发送组件异常。';
+  if (/HOOK_CONNECTION_RESET|HOOK_HEALTH_FAILED/.test(output)) return '微信发送组件连接被中断或检查失败（'+portLabel+'）。请查看 hook-init.log；持续失败时使用“修复微信连接”。';
+  if (/ADAPTER_LISTEN_FAILED|ADAPTER_START_FAILED/.test(output)) return '应用适配器未能启动。下方日志已保留失败阶段和系统错误码，请结合 adapter.stderr.log 检查。';
+  if (/SERVICE_START_TIMEOUT/.test(output)) return portLabel+'对应的本实例服务未在期限内准备完成。请查看该服务日志，或重启本实例后重试。';
   if (/READER_PORT_UNAVAILABLE/.test(output)) return '读取服务端口已被占用或被 Windows 拒绝。请在连接设置中修改微信读取端口，再启动服务；端口可能被未监听的其他程序占用。';
   if (/port is used by another installation|port is already in use|EADDRINUSE|address already in use/i.test(output)) return '配置端口已被占用。点击“检查占用进程”，核对程序后可选择停止，再重试。';
   if (/Another desktop WeChat is running|WECHAT_MULTIPLE/i.test(output)) return '检测到其他微信客户端。点击“检查占用进程”，确认并停止对应微信后，再打开匹配微信。';
@@ -65,6 +76,9 @@ export function taskFailureMessage(output, code) {
   if (/WECHAT_LAUNCH_EXITED/i.test(output)) return '微信启动后已退出。若微信提示必须升级，当前固定版本的发送组件需要重新适配；请保留完整微信提示。';
   if (/HOOK_VERSION_MISMATCH|Client version mismatch/i.test(output)) return '微信版本与发送组件不匹配，请在连接设置中选择匹配的微信程序。';
   if (/HOOK_LOGIN_REQUIRED/i.test(output)) return '发送组件已连接，但微信尚未打开账号数据库。请完成登录并等待聊天同步，然后重试。';
+  if (/HOOK_MULTIPLE_ACCOUNT_DATABASES/i.test(output)) return '匹配微信进程仍打开多个账号的数据库。点击“修复微信连接”，核对并再次确认后重开匹配微信，再登录目标账号。';
+  if (/HOOK_ACCOUNT_MISMATCH/i.test(output)) return '微信当前账号与所选数据库不一致。请重新选择当前账号，或在微信切换到所选账号后重试。';
+  if (/HOOK_ACCOUNT_METADATA_INVALID/i.test(output)) return '微信发送组件未提供有效账号信息。请检查组件版本或使用“修复微信连接”。';
   if (/HOOK_ACCOUNT_NOT_READY/i.test(output)) return '微信账号数据库尚未与读取设置匹配。请确认登录了对应账号，并等待聊天同步完成。';
   if (/WeChat-Hook is not ready|BACKEND_UNAVAILABLE|Matching WeChat client missing/i.test(output)) return '匹配微信尚未就绪。点击“打开微信”，登录配置的账号后再启动。';
   if (/Install the DSH plugin|Fully.*reopen DSH|ECONNREFUSED.*11230/i.test(output)) return 'DSH 插件尚未就绪。打开 DSH，启用本项目插件并完整重开后再启动。';

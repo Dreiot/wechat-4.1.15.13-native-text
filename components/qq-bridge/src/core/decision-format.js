@@ -12,6 +12,36 @@ export function hasReasoningControl(text) {
   return /<\/?(?:think|thinking|analysis|reasoning)(?:\s[^>]*)?>|<\|(?:im_start|im_end|analysis|channel|end)\|>|(?:^|\n)\s*(?:#{1,6}\s*)?(?:思考(?:过程|内容|链)?|内部(?:分析|推理|思考)|推理过程|分析过程|analysis|reasoning|thinking)\s*[:：\n]/i.test(String(text ?? ''));
 }
 
+// Protocol headers are reserved only at line boundaries. Preserve explicit
+// quoted/code examples and ordinary uses of the English verb "respond".
+function outsideCodeLines(text,transform){
+  const lines=String(text??'').split(/\r?\n/),result=[];
+  for(let i=0;i<lines.length;i++){
+    const line=transform(lines[i]);result.push(line);
+    const fence=/^[ \t]*(`{3,}|~{3,})[^`~]*$/.exec(line);
+    if(!fence)continue;
+    const closing=new RegExp('^[ \\t]*'+fence[1][0]+'{'+fence[1].length+',}[ \\t]*$');
+    let end=i+1;while(end<lines.length&&!closing.test(lines[end]))end++;
+    if(end<lines.length){result.push(...lines.slice(i+1,end+1));i=end;}
+  }
+  return result.join('\n');
+}
+const replyPrefix=/^[ \t\u200b\ufeff]*RESPOND[ \t\u200b\ufeff]*[:：][ \t\u200b\ufeff]*/i;
+export function cleanReplyProtocol(text){
+  return outsideCodeLines(text,line=>{
+    for(let i=0;i<8&&replyPrefix.test(line);i++)line=line.replace(replyPrefix,'');
+    return line;
+  }).trim();
+}
+export function hasReplyProtocolControl(text){
+  let found=false;
+  outsideCodeLines(text,line=>{
+    if(replyPrefix.test(line)||/^[ \t\u200b\ufeff]*(?:\*{1,2}|__)RESPOND(?:[ \t\u200b\ufeff]*[:：](?:\*{1,2}|__)|(?:\*{1,2}|__)[ \t\u200b\ufeff]*[:：])/i.test(line))found=true;
+    return line;
+  });
+  return found;
+}
+
 function shortStickerDecision(text, stickerRefs) {
   const short = /^\[\s*(?:STICKER\s*:\s*)?(S[1-3])\s*\]$/i.exec(text);
   if (!short) return null;
@@ -33,11 +63,14 @@ export function parseSocialDecision(output, stickerRefs = {}, {allowStickerCapti
   // prose still requires a model correction; it may contain internal reasoning.
   const tagged = /^(?:RESPOND|回复)\s*[:：]\s*([\s\S]+)$/i.exec(text);
   if (!tagged) return { decision: 'INVALID', text: '' };
-  const reply = tagged[1].trim();
+  const reply = cleanReplyProtocol(tagged[1]);
   if (hasReasoningControl(reply)) return { decision: 'INVALID', text: '' };
+  if (hasReplyProtocolControl(reply)) return { decision: 'INVALID', text: '' };
   const response=value=>{
     const text=value.trim().slice(0,1200);
-    const paragraphs=allowTextParts?text.split(/\r?\n[ \t]*\r?\n(?:[ \t]*\r?\n)*/).map(part=>part.trim()).filter(Boolean):[];
+    if(hasReplyProtocolControl(text))return {decision:'INVALID',text:''};
+    // Keep a code example within its quoting boundary in one message.
+    const paragraphs=allowTextParts&&!/^\s*(?:`{3,}|~{3,})/m.test(text)?text.split(/\r?\n[ \t]*\r?\n(?:[ \t]*\r?\n)*/).map(part=>part.trim()).filter(Boolean):[];
     const textParts=paragraphs.length<2?null:[paragraphs[0],paragraphs.slice(1).join('\n\n')];
     if(!textParts)return {decision:'RESPOND',text};
     return {decision:'RESPOND',text:textParts.join('\n\n'),textParts};
@@ -67,7 +100,7 @@ export async function resolveSocialDecision({ rawOutput, key, metadata, decide, 
   const repairMetadata = { ...metadata };
   // A distinct, deterministic identity bypasses the malformed cached result
   // without creating another model correction on each replay of this batch.
-  if (metadata.batchId) repairMetadata.batchId = crypto.createHash('sha256').update(metadata.batchId + '\0format-repair-v3').digest('hex');
+  if (metadata.batchId) repairMetadata.batchId = crypto.createHash('sha256').update(metadata.batchId + '\0format-repair-v4').digest('hex');
   delete repairMetadata.searchTicket;
   delete repairMetadata.searchContext;
   const previous = output.text.slice(0, 2000).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');

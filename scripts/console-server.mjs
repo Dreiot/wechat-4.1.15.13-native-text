@@ -11,16 +11,18 @@ import { fileURLToPath } from 'node:url';
 import { validateConfig, projectRoot } from './project-config.mjs';
 import { conversationId } from './hook-onebot.mjs';
 import { runConsoleCommand, taskFailureMessage, windowsPowerShellEnvironment, windowsPowerShellExecutable } from './console-process.mjs';
-import { personaError } from '../public/console/persona-files.mjs';
+import { personaError,personaReferences } from '../public/console/persona-files.mjs';
 import {applyChatSettings} from '../public/console/conversation-settings.mjs';
 import { runReaderSetup, readerSetupMessage } from './reader-setup.mjs';
 import { dshConfigurationMatches,sameProjectPath } from './dsh-configuration.mjs';
-import { createProcessRecovery } from './process-recovery.mjs';
+import { createProcessRecovery,startupConflictPorts } from './process-recovery.mjs';
 import { readerAccountId, cachedReaderAccount, applyReaderAccount } from './reader-account-state.mjs';
+import {verifyWeChatAccount} from './wechat-account-check.mjs';
 
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const fault = (message, status = 400) => Object.assign(new Error(message), { status });
+const setupCode = value => typeof value==='string'&&/^(?:READER|WECHAT|HOOK|REVIEWED)_[A-Z0-9_]{1,65}$/.test(value)?value:'';
 const atomic = (file, value) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.tmp`;
@@ -78,11 +80,12 @@ export function validateConsoleConfig(config, root) {
 }
 
 import {allowedConversation,validateConversationSettings} from '../packages/dsh-social-bridge-plugin/conversation-policy.mjs';
-export function createConsole({ root = projectRoot, port = 3210, runner, readerSetup = runReaderSetup, fetchImpl = fetch, nodeExecutable = process.execPath, filePicker, onQuit, processProbe, processStop } = {}) {
+export function createConsole({ root = projectRoot, port = 3210, runner, readerSetup = runReaderSetup, accountVerifier = verifyWeChatAccount, fetchImpl = fetch, nodeExecutable = process.execPath, filePicker, onQuit, processProbe, processStop } = {}) {
   const updates=createUpdateChecker({root,fetchImpl});
   const publicDir = path.join(projectRoot, 'public', 'console');
   const configFile = path.join(root, 'config', 'wechatagent.json');
   const preferenceFile = path.join(root, 'state', 'console-state.json');
+  const deletedPersonaFile = name => path.join(root,'state','deleted-personas',hash(name.toLocaleLowerCase())+'.json');
   const readerFile = path.join(root, 'state', 'weflow', 'WeFlow-config.json');
   const readerRevision = () => hash(JSON.stringify(optionalJson(readerFile)));
   const readerVerified = () => optionalJson(preferenceFile).readerVerifiedRevision === readerRevision();
@@ -154,14 +157,18 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     }
     return data;
   }
-  async function plugin(route) {
+  async function plugin(route,body) {
     const { config } = snapshot();
     const tokenFile = path.join(root, 'state', 'social-dsh-token.txt');
     if (!fs.existsSync(tokenFile)) throw fault('模型连接尚未准备，请先打开 DSH 并启用本项目插件。', 503);
     const token = fs.readFileSync(tokenFile, 'utf8').trim();
     const health = await remote(`http://127.0.0.1:${config.ports.dshPlugin}/health`, token);
     if (health.project !== 'WeChatAgent' || !sameProjectPath(health.projectRoot,root)) throw fault('DSH 插件连接到其他项目，请启用当前项目插件。', 503);
-    return remote(`http://127.0.0.1:${config.ports.dshPlugin}${route}`, token, 5000);
+    if(body===undefined)return remote(`http://127.0.0.1:${config.ports.dshPlugin}${route}`, token, 5000);
+    const response=await fetchImpl(`http://127.0.0.1:${config.ports.dshPlugin}${route}`,{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(60000)});
+    const result=await response.json();
+    if(!response.ok){const messages={SESSION_GROUP_SERVICE_UNAVAILABLE:'DSH 工作区服务尚未就绪，请从托盘完整退出并重开 DSH。',SESSION_GROUP_INVALID_NAME:'分组名称需要 1–60 个字符。',SESSION_GROUP_INVALID_PATH:'请选择一个已存在、可访问的完整目录。',SESSION_GROUP_CHANGED:'工作区列表已变化，请刷新会话页面后重试。',SESSION_GROUP_NOT_FOUND:'工作区已被移除，请刷新后重新选择。',SESSION_GROUP_DUPLICATE_NAME:'DSH 中已有同名工作区，请换一个名称。',SESSION_GROUP_NOT_EMPTY:'此工作区仍有未归档的 DSH 会话，请先移走它们。',SESSION_GROUP_SESSION_BUSY:'此聊天正在回复或维护，请稍后再移动。',SESSION_GROUP_SESSION_CHANGED:'当前会话已变化，请刷新后重新移动。',SESSION_GROUP_ACCOUNT_CHANGED:'微信账号已切换，请重开 DSH 后重试。',SESSION_GROUP_CHAT_NOT_ALLOWED:'请选择聊天范围中已保存的聊天。',SESSION_GROUP_CONFIRM_REQUIRED:'请确认跨目录移动时保留历史的方式。',SESSION_GROUP_SOURCE_UNAVAILABLE:'原会话的工作目录无法访问，请恢复该目录后再移动。'};throw fault(messages[result.error]??'工作区操作未完成，原会话仍保留。请检查 DSH 运行日志后重试。',[400,404,409].includes(response.status)?response.status:503);}
+    return result;
   }
   function buffered() {
     const buffer = optionalJson(path.join(root, 'state', 'social-messages.json'), { chats: {} });
@@ -241,7 +248,8 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       if (typeof body[key] !== 'string' || body[key].length > 4096 || /[\0\r\n]/.test(body[key])) throw fault('读取设置包含无效字符。');
     }
     if (typeof body.autoKey !== 'boolean') throw fault('请选择自动连接或手动验证。');
-    const dbPath = body.dbPath.trim() || settings.dbPath || '', myWxid = body.myWxid.trim() || settings.myWxid || '';
+    const dbPath = body.dbPath.trim(), myWxid = body.myWxid.trim();
+    if(!dbPath||!myWxid)throw fault('请先识别账号目录，并明确选择当前登录的微信账号。');
     const selectedId = readerAccountId(root, { dbPath, myWxid });
     const currentId = readerAccountId(root, settings);
     const cached = selectedId ? cachedReaderAccount(root, selectedId) : null;
@@ -257,7 +265,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     const checkRevision = readerRevision();
     const initialConfigRevision = snapshot().revision;
     const spec = connectRequest ? {} : command(body.action, body);
-    spec.timeoutMs = ['setup', 'hook-build'].includes(body.action) ? 1200000 : ['start', 'restart'].includes(body.action) ? 180000 : 150000;
+    spec.timeoutMs = ['setup', 'hook-build', 'hook-test'].includes(body.action) ? 1200000 : ['start', 'restart'].includes(body.action) ? 180000 : 150000;
     const id = crypto.randomUUID();
     const job = { id, action: body.action, state: 'running', startedAt: Date.now(), output: '', exitCode: null };
     jobs.set(id, job); activeJob = id; latestJob = id;
@@ -265,15 +273,24 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     const output = chunk => { job.output = safeText(job.output + chunk.toString()).slice(-40000); };
     Promise.resolve().then(async () => {
       if (!connectRequest) return execute(spec, output);
+      job.phase='checking-wechat';
+      await accountVerifier({root,config:snapshot().config,settings:connectRequest,fetchImpl,wait:false,requireReady:false});
+      job.phase='validating-database';
       const result = await readerSetup({ root, python: snapshot().config.runtime.python, request: connectRequest, onProgress: message => output(message + '\n') });
-      if (!result.ok) { job.message = readerSetupMessage(result.code); output(job.message + '\n'); return 1; }
+      if (!result.ok) { job.message = readerSetupMessage(result.code);if(setupCode(result.code)){job.code=setupCode(result.code);output('['+job.code+'] ');}output(job.message + '\n'); return 1; }
       if (checkRevision !== readerRevision()) throw fault('读取配置已在其他程序中变化。请刷新后重试，当前配置未覆盖。', 409);
       if (!/^userdpapi:[A-Za-z0-9+/=]+$/.test(result.protectedKey ?? '') || !result.dbPath || !result.myWxid) throw fault('凭据保护或数据库验证未完成，原配置已保留。');
       if (initialConfigRevision !== snapshot().revision) throw fault('其他设置已在验证期间变化。请刷新后重试，原账号配置已保留。', 409);
       const previousReader = optionalJson(readerFile);
       const settings = { ...previousReader, dbPath: result.dbPath, myWxid: result.myWxid, decryptKey: result.protectedKey };
+      if(readerAccountId(root,settings)!==readerAccountId(root,connectRequest))throw new Error('READER_ACCOUNT_RESULT_MISMATCH');
+      job.phase='confirming-wechat-account';
+      output('数据库已验证，正在确认微信实时账号；尚未保存切换结果…\n');
+      await accountVerifier({root,config:snapshot().config,settings,fetchImpl,onProgress:message=>output(message+'\n')});
+      if(checkRevision!==readerRevision()||initialConfigRevision!==snapshot().revision)throw fault('配置已在账号核对期间变化。请刷新后重试，原账号配置未覆盖。',409);
       const previousId = readerAccountId(root, previousReader), nextId = readerAccountId(root, settings);
       if (previousId && previousId !== nextId) {
+        job.phase='stopping-services';
         output('新账号已验证，正在停止旧账号的读取与消息服务…\n');
         const stopped = await execute(command('stop'), output);
         if (stopped !== 0) throw fault('旧账号服务未能停止，原账号配置已保留。请先停止服务后再切换。');
@@ -281,12 +298,16 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         if ((await Promise.all([ports.weflow, ports.onebot, ports.adapter].map(portOpen))).some(Boolean)) throw fault('旧账号服务端口仍在使用，原账号配置已保留。请退出占用服务后再切换。');
         if (checkRevision !== readerRevision() || initialConfigRevision !== snapshot().revision) throw fault('配置已在停止服务期间变化。请刷新后重试，原账号配置未覆盖。', 409);
       }
+      job.phase='switching-account';
+      await accountVerifier({root,config:snapshot().config,settings,fetchImpl,wait:false});
+      if(checkRevision!==readerRevision()||initialConfigRevision!==snapshot().revision)throw fault('配置已在保存账号前变化。请刷新后重试，原账号配置未覆盖。',409);
       backup(readerFile); backup(configFile);
       const applied = applyReaderAccount(root, previousReader, settings, snapshot().config);
       markPending(applied.needsDshRestart);
       atomic(preferenceFile, { ...optionalJson(preferenceFile), readerVerifiedRevision: readerRevision() });
       job.readerConfigured = true; job.accountSwitched = applied.changed;
       job.dshRestartRequired = applied.needsDshRestart;
+      job.phase='complete';
       output(applied.changed ? '已切换并保存账号。聊天范围按账号保存；请完整重开 DSH，再启动助手服务。\n' : applied.needsDshRestart ? '微信数据库已验证并保存。如果 DSH 已打开，请完整重开 DSH，再启动助手服务。\n' : '微信数据库已验证并保存。可以继续启动服务。\n');
       return 0;
     }).then(async code => {
@@ -307,7 +328,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         }
         atomic(preferenceFile, { ...optionalJson(preferenceFile), pendingApply: false, dshRestartRequired:false });
       }
-    }).catch(error => { job.state = 'failed'; job.exitCode = 1; job.message = error.status ? error.message : connectRequest ? readerSetupMessage(error.message) : taskFailureMessage(job.output, 1); output(job.message); }).finally(() => {
+    }).catch(error => { job.state = 'failed'; job.exitCode = 1; job.message = error.status ? error.message : connectRequest ? readerSetupMessage(error.message) : taskFailureMessage(job.output, 1);if(connectRequest&&setupCode(error.code??error.message)){job.code=setupCode(error.code??error.message);output('['+job.code+'] ');}output(job.message); }).finally(() => {
       job.finishedAt = Date.now(); activeJob = null; statusTime = 0;
     });
     return job;
@@ -346,6 +367,9 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         assets['/sticker-manager.js']=['sticker-manager.js','text/javascript; charset=utf-8'];assets['/sticker-manager.css']=['sticker-manager.css','text/css; charset=utf-8'];
         assets['/updates.js']=['updates.js','text/javascript; charset=utf-8'];
         assets['/conversation-settings.mjs']=['conversation-settings.mjs','text/javascript; charset=utf-8'];
+        assets['/persona-delete.js']=['persona-delete.js','text/javascript; charset=utf-8'];
+        assets['/dsh-install.mjs']=['dsh-install.mjs','text/javascript; charset=utf-8'];
+        assets['/session-groups.js']=['session-groups.js','text/javascript; charset=utf-8'];assets['/session-groups.css']=['session-groups.css','text/css; charset=utf-8'];
         assets['/process-recovery.js']=['process-recovery.js','text/javascript; charset=utf-8'];assets['/process-recovery.css']=['process-recovery.css','text/css; charset=utf-8'];
         assets['/dsh-access.js']=['dsh-access.js','text/javascript; charset=utf-8'];assets['/extensions.js']=['extensions.js','text/javascript; charset=utf-8'];
         if (!assets[route]) return reply(404, { error: '页面不存在。' });
@@ -368,7 +392,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       if (req.method === 'GET' && route === '/api/deployment') {
         const distribution = optionalJson(path.join(root, 'config', 'distribution.json'));
         const readerSettings = optionalJson(path.join(root, 'state', 'weflow', 'WeFlow-config.json'));
-        return reply(200, { installed: !!distribution.installed, version: distribution.version ?? '0.3.7-fix', configured: !!readerSettings.dbPath && !!readerSettings.myWxid && !!readerSettings.decryptKey && readerVerified(), pluginPath: path.join(root, 'packages', 'dsh-social-bridge-plugin') });
+        return reply(200, { installed: !!distribution.installed, version: distribution.version ?? '0.3.9', configured: !!readerSettings.dbPath && !!readerSettings.myWxid && !!readerSettings.decryptKey && readerVerified(), pluginPath: path.join(root, 'packages', 'dsh-social-bridge-plugin') });
       }
       if (req.method === 'GET' && route === '/api/status') return reply(200, await getStatus());
       if(req.method==='GET' && route==='/api/process-recovery'){
@@ -379,7 +403,8 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         if(status.services.find(service=>service.id==='reader')?.ready)healthyPorts.push(config.config.ports.weflow);
         if(status.services.find(service=>service.id==='bridge')?.ready)healthyPorts.push(config.config.ports.onebot,config.config.ports.adapter,Number(new URL(config.config.hook.baseUrl).port||80));
         if(status.services.find(service=>service.id==='dsh')?.ready)healthyPorts.push(config.config.ports.dshPlugin);
-        return reply(200,await processRecovery.scan(config.config,config.revision,{healthyPorts,includeMatchingWeChat:/HOOK_COMPONENT_UPDATE_PENDING|HOOK_CLIENT_UNHEALTHY|HOOK_INITIALIZATION_TIMEOUT|HOOK_NOT_LISTENING/.test(jobs.get(latestJob)?.output??'')}));
+        const conflictPorts=startupConflictPorts(jobs.get(latestJob)?.output,Object.values(config.config.ports));
+        return reply(200,await processRecovery.scan(config.config,config.revision,{healthyPorts:healthyPorts.filter(port=>!conflictPorts.includes(port)),includeMatchingWeChat:/HOOK_COMPONENT_UPDATE_PENDING|HOOK_CLIENT_UNHEALTHY|HOOK_INITIALIZATION_TIMEOUT|HOOK_NOT_LISTENING/.test(jobs.get(latestJob)?.output??'')}));
       }
 
       if (req.method === 'GET' && route === '/api/roles') {
@@ -404,6 +429,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         return reply(200, { chats: Object.entries(buffer.chats ?? {}).map(([key, rows]) => ({ key, name: rows.at(-1)?.conversation_name ?? key, lastAt: rows.at(-1)?.timestamp ?? 0 })) });
       }
       if (req.method === 'GET' && route === '/api/sessions') return reply(200, await plugin('/sessions'));
+      if(req.method==='GET'&&route==='/api/session-groups'){try{return reply(200,await plugin('/session-groups'));}catch{return reply(200,{available:false,groups:[],revision:''});}}
       if (req.method === 'GET' && route === '/api/job') {
         const job = jobs.get(url.searchParams.get('id')); if (!job) throw fault('此操作记录已过期。', 404); return reply(200, job);
       }
@@ -427,6 +453,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       if (route === '/api/jobs') return reply(202, startJob(body));
       assertIdle();
       if(['/api/sticker-manager/import','/api/sticker-manager/edit','/api/sticker-manager/delete'].includes(route))return reply(200,await stickerManager('/'+route.split('/').at(-1),body));
+      if(/^\/api\/session-groups\/(create|rename|delete|move)$/.test(route))return reply(200,await plugin(route.slice('/api'.length),body));
       if(route==='/api/group-bindings'){
         const config=snapshot();
         if(body.revision!==config.revision)throw fault('配置已变化，请刷新后重新关联群聊。',409);
@@ -485,6 +512,26 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         if(JSON.stringify(withoutStickers(previous.config))!==JSON.stringify(withoutStickers(config)))markPending(JSON.stringify(previous.config.dsh) !== JSON.stringify(config.dsh) || previous.config.ports.dshPlugin !== config.ports.dshPlugin);
         return reply(200, { ...snapshot(), ...optionalJson(preferenceFile) });
       }
+      if (route === '/api/roles/delete') {
+        if(personaError(body.name,'check'))throw fault('请选择有效的人设卡，不能删除说明文件或文件路径。');
+        if(body.confirmed!==true)throw fault('请先确认删除人设卡。',409);
+        const directory=path.join(root,'roles');
+        if(!fs.existsSync(directory))throw fault('人设卡已不存在，请刷新后重试。',404);
+        if(fs.lstatSync(directory).isSymbolicLink())throw fault('人设目录为链接，不能通过此入口删除。');
+        const filename=fs.readdirSync(directory).find(name=>name.toLocaleLowerCase()===(body.name+'.md').toLocaleLowerCase());
+        if(!filename)throw fault('人设卡已不存在，请刷新后重试。',404);
+        const name=filename.slice(0,-3),file=path.join(directory,filename),stat=fs.lstatSync(file);
+        if(!stat.isFile()||stat.isSymbolicLink())throw fault('此人设不是普通文件，不能删除。');
+        if(body.revision!==hash(fs.readFileSync(file,'utf8')))throw fault('人设卡已被修改，请重新载入后再删除。',409);
+        const references=personaReferences(snapshot().config.persona,name);
+        if(references.default)throw fault('此人设是默认人设，请先切换默认人设并保存设置。',409);
+        if(references.chats.length)throw fault('有聊天正在使用此人设，请先切换聊天人设并保存设置。',409);
+        backup(file);
+        const marker=deletedPersonaFile(name),previous=fs.existsSync(marker)?fs.readFileSync(marker,'utf8'):null;
+        atomic(marker,{version:1,name});
+        try{fs.unlinkSync(file);}catch(error){if(previous===null)fs.unlinkSync(marker);else atomic(marker,previous);throw error;}
+        return reply(200,{ok:true,name});
+      }
       if (route === '/api/roles') {
         const error = personaError(body.name, body.content);
         if (error) throw fault(error);
@@ -493,11 +540,13 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         const exists = fs.existsSync(file);
         if (exists && body.revision !== hash(fs.readFileSync(file, 'utf8'))) throw fault('同名人格已存在或已被修改，请重新载入或换一个名称。', 409);
         if (!exists && body.revision) throw fault('人格文件已被移动，请重新载入。', 409);
-        backup(file); atomic(file, body.content); markPending();
+        backup(file); atomic(file, body.content);
+        const marker=deletedPersonaFile(body.name);if(fs.existsSync(marker))fs.unlinkSync(marker);
+        markPending();
         return reply(200, { ok: true, revision: hash(body.content) });
       }
       if (route === '/api/browse') {
-        if (!['exe', 'folder'].includes(body.kind)) throw fault('无效的文件类型。');
+        if (!['exe', 'folder', 'workspace'].includes(body.kind)) throw fault('无效的文件类型。');
         return reply(200, { path: filePicker ? await filePicker(body.kind) : await nativeHelper(body.kind) });
       }
       if (route === '/api/dsh-reopened') {

@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { LOCKED_BEHAVIOR_REPLY, isBehaviorChangeCommand } from './chat-policy.js';
 import { normalizeForwardedRecord, forwardedRecordText, normalizeQuoteReply, quoteReplyText } from './wechat-events.js';
 import { selectStickerChoices, cleanStickerLabel, stickerPolicyKey } from './sticker-policy.js';
-import { SOCIAL_OUTPUT_NOTICE, resolveSocialDecision, hasStickerControl, hasReasoningControl } from './decision-format.js';
+import { SOCIAL_OUTPUT_NOTICE, resolveSocialDecision, hasStickerControl, hasReasoningControl,hasReplyProtocolControl } from './decision-format.js';
 export { parseSocialDecision } from './decision-format.js';
 import {SEARCH_DEFAULTS,searchPolicyKey,searchQuery} from '../../../../packages/dsh-social-bridge-plugin/search-policy.mjs';
 
@@ -339,6 +339,10 @@ export class SocialEngine {
       if(pending.deliveryNotice)this.buffer.setContextNotice(key,{id:deliveryId,text:pending.deliveryNotice});
       return true;
     };
+    if(pending.parts.some(part=>part.text&&hasReplyProtocolControl(part.text)&&!['confirmed','unconfirmed','failed','cancelled','expired'].includes(part.state))){
+      this.log(`[Social] ${key} delivery_cancelled reason=protocol_in_queued_text`);
+      return finish('旧回复包含发送协议标记，本机已停止后续投递；先前已提交部分送达情况可能未知，不自动补发，继续处理新消息。');
+    }
     const wait=at=>{
       persist();if(this.stopped)return false;
       clearTimeout(this.timers.get(key));this.timers.set(key,setTimeout(()=>{this.timers.delete(key);void this.#run(key,target,false);},Math.max(1,at-Date.now())));

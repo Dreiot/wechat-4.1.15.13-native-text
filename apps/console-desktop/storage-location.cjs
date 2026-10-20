@@ -42,16 +42,22 @@ function rebaseJson(value,mappings,key=''){
  return value;
 }
 async function hashFile(file){const hash=crypto.createHash('sha256');for await(const data of fs.createReadStream(file))hash.update(data);return hash.digest('hex');}
-async function copyVerified(source,target,{filter=()=>true,records=[],relative='',allowInternalLinks=false,externalLinkAllowed=()=>false,sourceBase=source,visited=new Set()}={}){
+function legacyPluginBackupLink(relative,source,target){
+ if(!/(?:^|\/)dsh\/dsh-social-bridge-plugin\.original-link$/i.test(relative.replaceAll('\\','/')))return false;
+ const resolved=path.resolve(path.dirname(source),target);
+ return path.basename(resolved).toLowerCase()==='dsh-social-bridge-plugin'&&path.basename(path.dirname(resolved)).toLowerCase()==='packages';
+}
+async function copyVerified(source,target,{filter=()=>true,records=[],relative='',allowInternalLinks=false,archiveLink=async()=>false,externalLinkAllowed=()=>false,sourceBase=source,visited=new Set()}={}){
  const stat=await fs.promises.lstat(source);
  if(!filter(relative,stat))return records;
  if(stat.isSymbolicLink()){
-  if(!allowInternalLinks)throw Error('旧数据中存在目录联接，迁移已停止，原数据保留。');
+  if(await archiveLink(source,relative))return records;
+  if(!allowInternalLinks)throw Error('旧数据中存在未支持的目录联接：'+source+'。迁移已停止，原数据保留。');
   const real=await fs.promises.realpath(source);if(!within(sourceBase,real)){if(externalLinkAllowed(real))return records;throw Error('旧 DSH 中存在指向外部数据的链接，请核对后再迁移，原数据保留。');}
   if(visited.has(real))throw Error('旧 DSH 数据中存在循环链接，原数据保留。');
-  return copyVerified(real,target,{filter,records,relative,allowInternalLinks,externalLinkAllowed,sourceBase,visited:new Set([...visited,real])});
+  return copyVerified(real,target,{filter,records,relative,allowInternalLinks,archiveLink,externalLinkAllowed,sourceBase,visited:new Set([...visited,real])});
  }
- if(stat.isDirectory()){await fs.promises.mkdir(target,{recursive:true});for(const name of await fs.promises.readdir(source))await copyVerified(path.join(source,name),path.join(target,name),{filter,records,relative:relative?relative+'/'+name:name,allowInternalLinks,externalLinkAllowed,sourceBase,visited});}
+ if(stat.isDirectory()){await fs.promises.mkdir(target,{recursive:true});for(const name of await fs.promises.readdir(source))await copyVerified(path.join(source,name),path.join(target,name),{filter,records,relative:relative?relative+'/'+name:name,allowInternalLinks,archiveLink,externalLinkAllowed,sourceBase,visited});}
  else if(stat.isFile()){
   const digest=await hashFile(source);await fs.promises.mkdir(path.dirname(target),{recursive:true});await fs.promises.copyFile(source,target);
   if(await hashFile(target)!==digest||await hashFile(source)!==digest)throw Error('复制校验失败或旧数据仍在变化，尚未切换数据目录。');
@@ -111,26 +117,35 @@ async function prepareDataHome(plan,{checkIdle=assertMigrationIdle,progress=()=>
  await checkIdle(plan);
  const lock=path.join(home,'.migration.lock');let handle;
  try{handle=await fs.promises.open(lock,'wx');}catch{throw Error('已有迁移正在进行或上次迁移被中断，请保留原数据并检查目标目录。');}
- const stage=path.join(home,'.migration-'+crypto.randomUUID()),target=path.join(stage,'workspace'),records=[],published=[];let committed=false;
+ const stage=path.join(home,'.migration-'+crypto.randomUUID()),target=path.join(stage,'workspace'),records=[],backupLinks=[],published=[];let committed=false;
  const removeStage=async()=>{if(!fs.existsSync(stage))return;const actual=await fs.promises.realpath(stage),actualHome=await fs.promises.realpath(home);if(!within(actualHome,actual)||same(actualHome,actual)||!/^\.migration-[a-f0-9-]+$/.test(path.basename(stage))||fs.lstatSync(stage).isSymbolicLink())throw Error('迁移临时目录校验失败，未执行清理。');await fs.promises.rm(stage,{recursive:true,force:true,maxRetries:4,retryDelay:50});};
  try{
   progress('正在复制旧配置、会话状态、表情包和记忆；原数据将保留…');
   const sourceRoot=path.join(plan.source,'workspace');
   for(const dir of ['config','roles','extensions','state'])if(fs.existsSync(path.join(sourceRoot,dir)))await copyVerified(path.join(sourceRoot,dir),path.join(target,dir),{records,relative:dir,filter:(relative,stat)=>!/(^|\/)(?:__pycache__|\.git)(\/|$)/.test(relative)&&!/^state\/(?:runtime\.json$|desktop\/runtime\.json$|desktop\/session(?:\/|$)|hook\/(?:native(?:\/|$)|wechat-[^/]+(?:\/|$)))/.test(relative)});
-  if(fs.existsSync(path.join(plan.source,'backups')))await copyVerified(path.join(plan.source,'backups'),path.join(stage,'backups'),{records});
+  if(fs.existsSync(path.join(plan.source,'backups')))await copyVerified(path.join(plan.source,'backups'),path.join(stage,'backups'),{records,archiveLink:async(source,relative)=>{
+   // Old repair backups contain a reference to the development plugin. Keep
+   // that reference as data; never copy or recreate its external directory.
+   const target=await fs.promises.readlink(source);
+   if(!legacyPluginBackupLink(relative,source,target))return false;
+   backupLinks.push({source,relative,target,copiedTarget:false});return true;
+  }});
   if(plan.migrateDsh){progress('正在复制内置 DSH 的会话和附件…');const coreRoots=[path.join(plan.source,'runtimes'),path.dirname(plan.distribution.dsh),...(plan.distribution.assets?[path.join(plan.distribution.assets,'vendor/dsh')]:[])];await copyVerified(plan.oldDshHome,path.join(stage,'dsh'),{records,allowInternalLinks:true,externalLinkAllowed:file=>coreRoots.some(base=>within(base,file)),filter:(relative,stat)=>!/(^|\/)(?:lock|SingletonLock|SingletonSocket|SingletonCookie|GPUCache|Cache|Code Cache)(\/|$)/.test(relative)});}
   await checkIdle(plan);for(const item of records)if(await hashFile(item.source)!==item.digest)throw Error('旧数据在迁移期间发生变化，尚未切换。');
+  for(const link of backupLinks){let unchanged=false;try{unchanged=(await fs.promises.lstat(link.source)).isSymbolicLink()&&await fs.promises.readlink(link.source)===link.target;}catch{}if(!unchanged)throw Error('旧备份联接在迁移期间发生变化：'+link.source+'。原数据保留，尚未切换。');}
   const mappings=[[sourceRoot,path.join(home,'workspace')],[plan.source,home]];
   if(plan.migrateDsh)mappings.push([plan.oldDshHome,path.join(home,'dsh')]);
   await rewriteTree(target,mappings);
   if(plan.migrateDsh)await rewriteTree(path.join(stage,'dsh/profiles'),mappings,{yaml:true});
+  const backupLinkFile=backupLinks.length?'backups/migration-link-references-'+path.basename(stage).slice('.migration-'.length)+'.json':undefined;
+  if(backupLinkFile)atomic(path.join(stage,backupLinkFile),{version:1,policy:'reference-only',links:backupLinks});
   const cfg=json(path.join(target,'config/wechatagent.json'));if(!cfg.runtime||!cfg.persona||!cfg.wechat)throw Error('旧配置无效，原数据保留。');
   for(const name of [cfg.persona.default,...Object.values(cfg.persona.chats||{})])if(typeof name!=='string'||/[\\/]/.test(name)||!fs.existsSync(path.join(target,'roles',name+'.md')))throw Error('迁移后的人设文件缺失，原数据保留。');
   await verify({stage,workspace:target,plan});
   if(fs.existsSync(path.join(home,'.wechatagent-data.json')))throw Error('目标目录已被另一个实例初始化，未覆盖已有数据。');
   for(const name of ['workspace',...(plan.migrateDsh?['dsh']:[]),...(fs.existsSync(path.join(stage,'backups'))?['backups']:[])]){const destination=path.join(home,name);if(fs.existsSync(destination))throw Error('目标目录在迁移期间发生变化，尚未覆盖任何已有数据。');await fs.promises.rename(path.join(stage,name),destination);published.push(destination);}
   for(const name of ['window.json','background.png','background.jpg']){const source=[path.join(plan.source,'desktop',name),path.join(home,'workspace/state/desktop',name)].find(file=>fs.existsSync(file));if(source&&!fs.existsSync(path.join(home,'desktop',name))){await fs.promises.mkdir(path.join(home,'desktop'),{recursive:true});await fs.promises.copyFile(source,path.join(home,'desktop',name));}}
-  const report={version:1,source:plan.source,oldDshHome:plan.oldDshHome,managedDsh:plan.managedDsh,migratedAt:new Date().toISOString(),verifiedFiles:records.length,dshCopied:plan.migrateDsh,oldDataRetained:true};
+  const report={version:1,source:plan.source,oldDshHome:plan.oldDshHome,managedDsh:plan.managedDsh,migratedAt:new Date().toISOString(),verifiedFiles:records.length,dshCopied:plan.migrateDsh,oldDataRetained:true,...(backupLinkFile?{archivedBackupLinks:backupLinks.length,backupLinkFile}:{})};
   atomic(path.join(home,'.wechatagent-data.json'),report);committed=true;
   try{atomic(path.join(home,'backups/migration.json'),report);}catch{/* The committed marker already retains the complete report. */}
   await removeStage().catch(()=>{});progress('旧数据已复制并校验完成，正在准备新版运行环境…');return {migrated:true,report};

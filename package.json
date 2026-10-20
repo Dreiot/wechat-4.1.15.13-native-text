@@ -1,6 +1,6 @@
 {
   "name": "wechatagent",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "private": true,
   "type": "module",
   "description": "Personal WeChat AI friend with NT reader, WeChat-Hook, OneBot v11 and an existing DSH Desktop",
@@ -31,7 +31,14 @@
     "privacy:check": "node scripts/public-source-check.mjs",
     "test:shutdown": "node --test scripts/test-desktop-shutdown.mjs scripts/test-desktop-lifecycle.mjs",
     "test:hook-startup": "node --test scripts/test-hook-startup.mjs scripts/test-hook-launcher.mjs scripts/test-hook-repair-ui.mjs scripts/test-hook-repair-api.mjs scripts/test-process-recovery.mjs",
-    "test:storage": "node --test scripts/test-data-storage.mjs scripts/test-storage-runtime.mjs"
+    "test:storage": "node --test scripts/test-installer-directory.mjs scripts/test-data-storage.mjs scripts/test-storage-runtime.mjs",
+    "test:startup": "node --test scripts/test-adapter-startup.mjs scripts/test-hook-startup.mjs scripts/test-process-recovery.mjs scripts/test-hook-repair-api.mjs",
+    "test:reply-protocol": "node --test scripts/test-reply-protocol.mjs",
+    "test:prompt-policy": "node --test scripts/test-prompt-policy.mjs",
+    "test:persona-delete": "node --test scripts/test-persona-delete.mjs",
+    "test:external-dsh": "node --test scripts/test-external-dsh.mjs",
+    "test:wechat-account": "node --test scripts/test-wechat-account-check.mjs scripts/test-reader-account-state.mjs scripts/test-hook-startup.mjs",
+    "test:session-groups": "node --test scripts/test-session-groups.mjs scripts/test-native-session.mjs"
   },
   "devDependencies": {
     "@electron/asar": "3.4.1",

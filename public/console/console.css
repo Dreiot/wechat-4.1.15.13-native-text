@@ -34,3 +34,7 @@
 .sidebar{overflow:hidden}.sidebar>nav{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden}.sidebar>.nav-caption,.sidebar>.brand,.sidebar-bottom{flex-shrink:0}.sidebar-bottom{padding-top:14px}
 @media(max-width:640px){.desktop-mode .topbar{padding:4px 12px 0;display:grid;grid-template-columns:minmax(0,1fr);gap:0}.desktop-mode .breadcrumb{padding-right:148px;min-height:48px}.desktop-mode .topbar-actions{width:auto;justify-content:flex-end;padding-bottom:8px}}
 .sidebar nav a{gap:10px;padding:0 10px}.sidebar nav a>span:not(.nav-count){min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sidebar nav .nav-count{flex-shrink:0}
+
+/* First-run setup: short checks share a row; DSH uses the full row. */
+.setup-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.setup-grid>.card{min-width:0}.setup-grid>.setup-dsh-card{grid-column:1/-1}
+@media(max-width:1100px){.setup-grid{grid-template-columns:minmax(0,1fr)}}

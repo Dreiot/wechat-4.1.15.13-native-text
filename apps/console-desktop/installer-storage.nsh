@@ -1,7 +1,7 @@
 !ifndef BUILD_UNINSTALLER
 !define /ifndef INSTALL_REGISTRY_KEY "Software\${APP_GUID}"
-!include nsDialogs.nsh
 !include MUI2.nsh
+!insertmacro MUI_DIRECTORYPAGE_INTERFACE
 !include LogicLib.nsh
 !include FileFunc.nsh
 
@@ -9,13 +9,18 @@ Var WcaDataHome
 Var WcaMigrationSource
 Var WcaRoot
 Var WcaProgram
-Var WcaDialog
-Var WcaDataInput
-Var WcaMigrateCheck
+Var WcaPreviousProgram
+Var WcaRememberedDataHome
+Var WcaStorageError
 Var WcaMigrate
 
 !macro customInit
+  ReadRegStr $WcaPreviousProgram HKCU "${INSTALL_REGISTRY_KEY}" "InstallLocation"
   ReadRegStr $WcaDataHome HKCU "Software\WeChatAgent" "DataHome"
+  ReadINIStr $1 "$WcaPreviousProgram\storage.ini" "Storage" "dataHome"
+  ${If} $1 != ""
+    StrCpy $WcaDataHome $1
+  ${EndIf}
   ReadINIStr $1 "$INSTDIR\storage.ini" "Storage" "dataHome"
   ${If} $1 != ""
     StrCpy $WcaDataHome $1
@@ -26,6 +31,9 @@ Var WcaMigrate
   ${EndIf}
   ${IfNot} ${FileExists} "$WcaMigrationSource\workspace\config\wechatagent.json"
     ReadINIStr $1 "$INSTDIR\storage.ini" "Storage" "migrationSource"
+    ${If} $1 == ""
+      ReadINIStr $1 "$WcaPreviousProgram\storage.ini" "Storage" "migrationSource"
+    ${EndIf}
     ${If} $1 != ""
       StrCpy $WcaMigrationSource $1
     ${Else}
@@ -47,90 +55,121 @@ Var WcaMigrate
     ${EndIf}
   ${EndIf}
   StrCpy $WcaMigrate "1"
-  # The directory page selects the parent containing app and data.
+  StrCpy $WcaRememberedDataHome $WcaDataHome
+  # The only directory page edits WcaRoot, never the app directory.
+  StrCpy $WcaRoot $INSTDIR
   ReadINIStr $0 "$INSTDIR\storage.ini" "Storage" "layoutVersion"
-  ${If} ${Silent}
-    ${If} $0 != "1"
-      StrCpy $INSTDIR "$INSTDIR\app"
-    ${EndIf}
+  ${If} $0 == "1"
     ${GetParent} "$INSTDIR" $WcaRoot
-    ${If} $WcaDataHome == ""
-      StrCpy $WcaDataHome "$WcaRoot\data"
+  ${ElseIf} $INSTDIR == $WcaPreviousProgram
+  ${AndIf} $WcaRememberedDataHome != ""
+    ${GetFileName} "$INSTDIR" $0
+    ${If} $0 == "app"
+      ${GetParent} "$INSTDIR" $WcaRoot
     ${EndIf}
-  ${ElseIf} $0 == "1"
-    ${GetParent} "$INSTDIR" $INSTDIR
+  ${EndIf}
+  ${If} ${Silent}
+    Call WcaStoragePreInstall
   ${EndIf}
   ClearErrors
 !macroend
 
-!macro customPageAfterChangeDir
-  Page custom WcaStoragePage WcaStorageLeave
-!macroend
-
-Function WcaStoragePage
-  StrCpy $WcaRoot $INSTDIR
-  ${If} $WcaDataHome == ""
-    StrCpy $WcaDataHome "$WcaRoot\data"
-  ${EndIf}
-  nsDialogs::Create 1018
-  Pop $WcaDialog
-  ${If} $WcaDialog == error
-    Abort
-  ${EndIf}
-  !insertmacro MUI_HEADER_TEXT "选择数据位置" "程序安装到所选目录的 app 子目录，数据单独保留。"
-  ${NSD_CreateLabel} 0 0 100% 24u "账号配置、人设、表情包、聊天状态和运行环境将保存到下面的位置。升级与卸载默认保留这些数据。"
-  Pop $0
-  ${NSD_CreateDirRequest} 0 32u 78% 14u "$WcaDataHome"
-  Pop $WcaDataInput
-  ${NSD_CreateBrowseButton} 80% 31u 20% 16u "浏览…"
-  Pop $0
-  ${NSD_OnClick} $0 WcaStorageBrowse
-  ${NSD_CreateCheckbox} 0 58u 100% 16u "首次启动时迁移已有数据，并保留旧副本"
-  Pop $WcaMigrateCheck
-  ${If} ${FileExists} "$WcaMigrationSource\workspace\config\wechatagent.json"
-    ${NSD_Check} $WcaMigrateCheck
+Function WcaNormalizeDirectory
+  Exch $0
+  Push $1
+  Push $2
+  # Unlike NSIS GetFullPathName, this also resolves not-yet-created folders.
+  System::Call 'kernel32::GetFullPathNameW(w r0, i ${NSIS_MAX_STRLEN}, w .r1, p 0)i.r2'
+  ${If} $2 == 0
+  ${OrIf} $2 >= ${NSIS_MAX_STRLEN}
+    StrCpy $0 ""
   ${Else}
-    ${NSD_Uncheck} $WcaMigrateCheck
-    EnableWindow $WcaMigrateCheck 0
+    StrCpy $0 $1
+    ${GetRoot} "$0" $1
+    ${If} $0 != $1
+    ${AndIf} $0 != "$1\"
+      wca_trim_separator:
+      StrCpy $2 $0 1 -1
+      ${If} $2 == "\"
+        StrCpy $0 $0 -1
+        Goto wca_trim_separator
+      ${EndIf}
+    ${EndIf}
   ${EndIf}
-  ${NSD_CreateLabel} 0 82u 100% 34u "旧数据位置：$WcaMigrationSource$\r$\n迁移在首次启动时进行。请先停止旧版服务，并退出匹配微信和 DSH。目标已有数据时不会合并覆盖。"
-  Pop $0
-  nsDialogs::Show
+  Pop $2
+  Pop $1
+  Exch $0
 FunctionEnd
 
-Function WcaStorageBrowse
-  Pop $0
-  ${NSD_GetText} $WcaDataInput $WcaDataHome
-  nsDialogs::SelectFolderDialog "选择数据目录" "$WcaDataHome"
-  Pop $0
-  ${If} $0 != error
-    ${NSD_SetText} $WcaDataInput "$0"
+Function WcaSelectStoragePaths
+  Push "$WcaRoot"
+  Call WcaNormalizeDirectory
+  Pop $WcaRoot
+  StrCpy $WcaProgram "$WcaRoot\app"
+  # Reinstalling a known app preserves its separately selected data path.
+  # A different root always starts with that root's own data directory.
+  ReadINIStr $0 "$WcaProgram\storage.ini" "Storage" "dataHome"
+  ${If} $0 != ""
+    StrCpy $WcaDataHome $0
+  ${ElseIf} $WcaProgram == $WcaPreviousProgram
+  ${AndIf} $WcaRememberedDataHome != ""
+    StrCpy $WcaDataHome $WcaRememberedDataHome
+  ${Else}
+    StrCpy $WcaDataHome "$WcaRoot\data"
   ${EndIf}
 FunctionEnd
 
 Function WcaStorageLeave
-  ${NSD_GetText} $WcaDataInput $WcaDataHome
-  ${NSD_GetState} $WcaMigrateCheck $WcaMigrate
-  ${If} $WcaDataHome == ""
-    MessageBox MB_ICONEXCLAMATION "请选择数据目录。"
+  # NSIS commits DirVar after this callback; read the current edit control.
+  StrCpy $0 $mui.DirectoryPage.Directory
+  System::Call 'user32::GetWindowTextW(p r0, w .r1, i ${NSIS_MAX_STRLEN})i.r2'
+  StrCpy $WcaRoot $1
+  Call WcaPrepareStorage
+  ${If} $WcaStorageError != ""
+    MessageBox MB_ICONEXCLAMATION "$WcaStorageError"
     Abort
   ${EndIf}
-  GetFullPathName $WcaDataHome "$WcaDataHome"
+FunctionEnd
+
+Function WcaStoragePreInstall
+  Call WcaPrepareStorage
+  ${If} $WcaStorageError != ""
+    MessageBox MB_ICONSTOP "$WcaStorageError" /SD IDOK
+    SetErrorLevel 2
+    Quit
+  ${EndIf}
+FunctionEnd
+
+Function WcaPrepareStorage
+  StrCpy $WcaStorageError ""
+  ${If} $WcaRoot == ""
+    StrCpy $WcaStorageError "请选择安装文件夹。"
+    Return
+  ${EndIf}
+  Call WcaSelectStoragePaths
+  ${GetRoot} "$WcaRoot" $0
+  ${If} $WcaRoot == $0
+  ${OrIf} $WcaRoot == "$0\"
+    StrCpy $WcaStorageError "请选择一个安装文件夹，不能直接使用磁盘根目录。"
+    Return
+  ${EndIf}
+  Push "$WcaDataHome"
+  Call WcaNormalizeDirectory
+  Pop $WcaDataHome
   ${GetRoot} "$WcaDataHome" $0
   ${If} $WcaDataHome == $0
   ${OrIf} $WcaDataHome == "$0\"
-    MessageBox MB_ICONEXCLAMATION "请在磁盘中选择一个数据文件夹，不能直接使用磁盘根目录。"
-    Abort
+    StrCpy $WcaStorageError "旧版数据位置不能是磁盘根目录，请先备份到独立文件夹。"
+    Return
   ${EndIf}
-  StrCpy $WcaProgram "$WcaRoot\app"
   # Compare case-insensitively, including a trailing separator boundary.
   StrCpy $0 "$WcaProgram\"
   StrCpy $1 "$WcaDataHome\"
   StrLen $2 $0
   StrCpy $3 $1 $2
   ${If} $3 == $0
-    MessageBox MB_ICONEXCLAMATION "数据不能放在 app 程序目录中，否则卸载时可能被删除。"
-    Abort
+    StrCpy $WcaStorageError "数据不能放在 app 程序目录中，否则卸载时可能被删除。"
+    Return
   ${EndIf}
   ${If} $WcaMigrate == "1"
   ${AndIf} $WcaDataHome != $WcaMigrationSource
@@ -138,22 +177,22 @@ Function WcaStorageLeave
     StrLen $2 $0
     StrCpy $3 $1 $2
     ${If} $3 == $0
-      MessageBox MB_ICONEXCLAMATION "新旧数据目录不能互相包含，请选择旧目录之外的位置。"
-      Abort
+      StrCpy $WcaStorageError "新旧数据目录不能互相包含，请选择旧目录之外的安装位置。"
+      Return
     ${EndIf}
     StrLen $2 $1
     StrCpy $3 $0 $2
     ${If} $3 == $1
-      MessageBox MB_ICONEXCLAMATION "新旧数据目录不能互相包含，请选择旧目录之外的位置。"
-      Abort
+      StrCpy $WcaStorageError "新旧数据目录不能互相包含，请选择旧目录之外的安装位置。"
+      Return
     ${EndIf}
   ${EndIf}
   StrCpy $0 "$WcaProgram\"
   StrLen $2 $1
   StrCpy $3 $0 $2
   ${If} $3 == $1
-    MessageBox MB_ICONEXCLAMATION "程序目录与数据目录不能互相包含。"
-    Abort
+    StrCpy $WcaStorageError "程序目录与数据目录不能互相包含。"
+    Return
   ${EndIf}
   # Existing data under a legacy install directory would be deleted by its
   # old uninstaller before extraction. Refuse that target; never move it here.
@@ -164,8 +203,8 @@ Function WcaStorageLeave
       StrLen $2 $0
       StrCpy $3 $1 $2
       ${If} $3 == $0
-        MessageBox MB_ICONEXCLAMATION "该数据位于旧程序目录内，旧版卸载可能删除它。请先备份并选择程序目录外的位置。"
-        Abort
+        StrCpy $WcaStorageError "该数据位于旧程序目录内，旧版卸载可能删除它。请先备份并选择程序目录外的位置。"
+        Return
       ${EndIf}
     ${EndIf}
   ${EndIf}
@@ -178,8 +217,8 @@ Function WcaStorageLeave
   CreateDirectory "$WcaDataHome"
   GetTempFileName $5 "$WcaDataHome"
   ${If} ${Errors}
-    MessageBox MB_ICONEXCLAMATION "无法写入数据目录，请选择当前用户可写的位置。"
-    Abort
+    StrCpy $WcaStorageError "无法写入数据目录，请选择当前用户可写的安装位置。"
+    Return
   ${EndIf}
   Delete "$5"
   ${If} $4 == "1"
@@ -189,13 +228,6 @@ Function WcaStorageLeave
 FunctionEnd
 
 !macro customInstall
-  # Silent upgrades reuse the remembered data path and install only app.
-  ${If} $WcaRoot == ""
-    ${If} $WcaDataHome == ""
-      ${GetParent} "$INSTDIR" $WcaRoot
-      StrCpy $WcaDataHome "$WcaRoot\data"
-    ${EndIf}
-  ${EndIf}
   # Force Unicode INI output; an ANSI INI would corrupt Chinese paths.
   ClearErrors
   FileOpen $0 "$INSTDIR\storage.ini" w

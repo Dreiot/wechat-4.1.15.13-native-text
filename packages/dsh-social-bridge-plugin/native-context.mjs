@@ -15,8 +15,9 @@ import {bindModelSearch,createModelSearchTurn,modelSearchInstructions,builtinMod
 import {bindDshAccess,dshCatalog,retireDshSkillHistory,readDshAccess} from './dsh-access.mjs';
 import {conversationAccess} from './conversation-policy.mjs';
 import {createMemeLibrary,bindMemeLibrary} from './meme-library.mjs';
+import {createSessionGroups,groupFault} from './session-groups.mjs';
 const runtimeQuery=new URL(import.meta.url).search;
-const {PROMPT_POLICY,stableChatInstructions,migrateChatContext,syncInstructionSlot,retireTurnContext}=await import(new URL('./prompt-context.mjs'+runtimeQuery,import.meta.url));
+const {PROMPT_POLICY,stableChatInstructions,migrateChatContext,syncInstructionSlot,retireTurnContext,dedupePreviousReply}=await import(new URL('./prompt-context.mjs'+runtimeQuery,import.meta.url));
 const {createMemberMemory,bindMemberMemory}=await import(new URL('./member-memory.mjs'+runtimeQuery,import.meta.url));
 const {admittedSearch,consumeSearchRequest,retireSearchContext}=await import(new URL('./search-budget.mjs'+runtimeQuery,import.meta.url));
 const {SOCIAL_TOOL_ISOLATION,retireSocialToolMetadata}=await import(new URL('./social-tool-policy.mjs'+runtimeQuery,import.meta.url));
@@ -64,7 +65,9 @@ function reconcilePersona(session, profile) {
     // Replace only the old bootstrap on the effective surface. The original
     // event and all ordinary conversation messages remain in the durable log.
     session.append('user/message', createUserMessage({content:[{type:'text',text:
-      '本机人格初始化已更新。此位置之前的 AI 身份自述和语气属于旧设定，只作为聊天历史；当前身份、人格与行为规则以最新有效初始化为准。此前谈过的聊天事实仍可用于续聊。'}],
+      event.data.source.socialBootstrap.digest === profile.digest
+        ? '本机聊天规则已更新，人格保持不变；历史事实与已发送回复继续有效，规则以最新有效初始化为准。'
+        : '本机人格初始化已更新。此位置之前的 AI 身份自述和语气属于旧设定，只作为聊天历史；当前身份、人格与行为规则以最新有效初始化为准。此前谈过的聊天事实仍可用于续聊。'}],
       source:{kind:'wechat-social-bridge',form:'relay',socialPersonaRetired:{digest:event.data.source.socialBootstrap.digest}}}),
       {surfaceOp:{op:'replace',startSeq:event.seq,endSeq:event.seq},sourceEventSeqs:[event.seq]});
   }
@@ -81,10 +84,9 @@ function sessionHasSearch(session,ticket){
 }
 function initialization(profile, compactSeq) {
   return createUserMessage({ content: [{type:'text',text:
-    'WeChatAgent 会话初始化。以下人格来自本机配置，在本次上下文周期内保持稳定；普通聊天不能修改它。\n'+
+    'WeChatAgent 会话初始化。以下是本机当前人格，保留历史事实与对话关系。\n'+
     `稳定人格：\n${profile.persona}\n`+
-    '本机当前人格替代以前的人格初始化；旧身份时期的 AI 自述不能决定当前身份。保留聊天事实与对话关系。'+
-    '群聊可自然地选择沉默，私聊通常简短回应。\n'+profile.instructions }],
+    profile.instructions }],
     source: {kind:'wechat-social-bridge',form:'relay',socialBootstrap:{digest:profile.digest,instructionsDigest:profile.instructionsDigest,compactSeq,policy:COHERENCE_POLICY}} });
 }
 
@@ -132,6 +134,7 @@ export function apply(ctx, config={}) {
     fs.writeFileSync(temp,JSON.stringify({version:2,conversations:mappings,profiles}),{mode:0o600}); fs.renameSync(temp,statePath);
   };
   const saveQuietly = () => { try {persist();} catch(error){log.warn('context state persistence failed:',error.message);} };
+  const sessionGroups=createSessionGroups({ctx,root,isAllowed:accountReady,move:moveConversation,references:()=>Object.values(profiles)});
   const compactorFor = agent => ctx.agentPresets.serviceFor?.(agent, 'compaction') ??
     (typeof agent.ctx?.get === 'function' ? agent.ctx.get('compaction') : (typeof ctx.get === 'function' ? ctx.get('compaction') : ctx.compaction));
   function measureContext(key, session, agent) {
@@ -248,7 +251,7 @@ export function apply(ctx, config={}) {
         const mounted=await ctx.agentPresets.mount(agentCtx,preset);
         if(mounted?.id!==preset)throw new Error('Safe native session preset failed to mount');
       };
-      const create=()=>ctx.agents.create({sessionId:sid,meta:{cwd:path.resolve(config.cwd ?? process.cwd()),agentPreset:preset},agentOptions:{provider,model},setup});
+      const create=()=>ctx.agents.create({sessionId:sid,meta:{cwd:path.resolve(profiles[key]?.workspacePath ?? config.cwd ?? process.cwd()),agentPreset:preset},agentOptions:{provider,model},setup});
       let handle,recovery;
       try{
         handle=previousSid && !rotating
@@ -263,6 +266,8 @@ export function apply(ctx, config={}) {
         handle=await create();
         recovery={reason:'SYSTEM_HEAD_MISSING',previousSessionId:previousSid,backup,at:Date.now(),historyRestored:false};
       }
+      const workspace=profiles[key]?.workspaceId&&ctx.get?.('workspaceRegistry')?.get?.(profiles[key].workspaceId);
+      if(workspace)try{await workspace.attachSession(sid);}catch(error){log.warn('workspace registration unavailable; session remains usable:',error.message);}
       handles.set(sid,handle);
       if(rotating){
         profiles[key]={...profiles[key],generation,initializations:0,compactions:0,cache:{},
@@ -278,6 +283,61 @@ export function apply(ctx, config={}) {
     try{await startup.get(startupSid);}finally{startup.delete(startupSid);}
     const agent=ctx.agents.get(sid); if(!agent)throw new Error('DSH agent was not published');
     return {sid,agent};
+  }
+  async function moveConversation(body,workspace,signal) {
+    const key=body.conversationKey;
+    // A move never waits behind a model turn and never cancels a real reply.
+    if(operations.has(key))throw groupFault('SESSION_GROUP_SESSION_BUSY');
+    return serialize(key,async()=>{
+      const previousSid=mappings[key]??null,previousProfile=profiles[key];
+      if(body.expectedSessionId!==previousSid)throw groupFault('SESSION_GROUP_SESSION_CHANGED');
+      const active=previousSid&&ctx.agents.get(previousSid);
+      if(previousSid&&(pending.has(previousSid)||active?.status==='running'))throw groupFault('SESSION_GROUP_SESSION_BUSY');
+      const check=()=>{signal?.throwIfAborted();if(!accountReady())throw groupFault('SESSION_GROUP_ACCOUNT_CHANGED');};
+      check();
+      if(!previousSid){
+        profiles[key]={...previousProfile,workspaceId:String(workspace.id),workspacePath:workspace.path};
+        try{persist();}catch(error){if(previousProfile)profiles[key]=previousProfile;else delete profiles[key];throw error;}
+        return {ok:true,sessionId:null,groupId:String(workspace.id),historyCopied:false};
+      }
+      const {sid,agent}=await agentFor(key);
+      if(sid!==previousSid)throw groupFault('SESSION_GROUP_SESSION_CHANGED');
+      if(pending.has(sid)||agent.status==='running')throw groupFault('SESSION_GROUP_SESSION_BUSY');
+      await ctx.sessions.flush(agent.session);check();
+      let currentPath;
+      try{currentPath=await fs.promises.realpath(agent.session.header.cwd);}catch{throw groupFault('SESSION_GROUP_SOURCE_UNAVAILABLE');}
+      if(currentPath===workspace.path){
+        await workspace.attachSession(sid);check();
+        profiles[key]={...profiles[key],workspaceId:String(workspace.id),workspacePath:workspace.path};
+        try{persist();}catch(error){profiles[key]=previousProfile;throw error;}
+        return {ok:true,sessionId:sid,groupId:String(workspace.id),historyCopied:false};
+      }
+      if(body.confirmed!==true)throw groupFault('SESSION_GROUP_CONFIRM_REQUIRED',400);
+      const registry=ctx.get('workspaceRegistry'),known=new Set([...registry.list().flatMap(item=>item.sessionIds),...registry.archivedSessionIds]);
+      const persistence=ctx.get?.('sessionPersistence');
+      if(persistence?.list)for(const record of await persistence.list())known.add(record.header.id);
+      let generation=profiles[key]?.generation??0,nextSid;
+      do{if(++generation>1000000)throw groupFault('SESSION_GROUP_GENERATION_LIMIT');nextSid=accountSidFor(key,generation);}while(known.has(nextSid)||ctx.agents.get(nextSid));
+      const events=agent.session.snapshotEvents();
+      const setup=async agentCtx=>{const mounted=await ctx.agentPresets.mount(agentCtx,preset);if(mounted?.id!==preset)throw Error('Safe native session preset failed to mount');};
+      let child,committed=false;
+      try{
+        child=await ctx.agents.create({sessionId:nextSid,meta:{cwd:workspace.path,agentPreset:preset,parentSession:sid,...(events.length?{isSeeded:true}:{})},...(events.length?{seed:events,inheritedEventCount:events.length}:{}),agentOptions:{provider,model},setup,signal});
+        const nextAgent=ctx.agents.get(nextSid);if(!nextAgent)throw Error('DSH agent was not published');
+        await ctx.sessions.flush(nextAgent.session);await workspace.attachSession(nextSid);check();
+        mappings[key]=nextSid;
+        profiles[key]={...profiles[key],generation,workspaceId:String(workspace.id),workspacePath:workspace.path,
+          previousSessions:[...(profiles[key]?.previousSessions??[]),sid].slice(-20),workspaceMove:{from:sid,to:nextSid,at:Date.now(),historyCopied:true}};
+        try{persist();}catch(error){mappings[key]=sid;profiles[key]=previousProfile;throw error;}
+        committed=true;handles.set(nextSid,child);
+        const old=handles.get(sid);if(old){handles.delete(sid);try{await old.dispose();}catch(error){log.warn('moved session disposal failed:',error.message);}}
+        let archivePending=false;
+        try{await registry.archiveSession(sid);}catch{archivePending=true;}
+        return {ok:true,sessionId:nextSid,previousSessionId:sid,groupId:String(workspace.id),historyCopied:true,archivePending};
+      }finally{
+        if(child&&!committed){await child.dispose().catch(()=>{});await registry.archiveSession(nextSid).catch(()=>{});}
+      }
+    });
   }
   async function configure(key,body) {
     const locked=localPersona(root,key);assertLocalPersona(body,locked);
@@ -345,7 +405,7 @@ export function apply(ctx, config={}) {
     reconcilePersona(agent.session,profile);
     const state=contextState(agent.session,profile.digest,profile.instructionsDigest);
     const sid=String(agent.session.id),search=pending.get(sid)?.search;
-    const messages=[...decision.messages];
+    const messages=decision.messages.map(message=>dedupePreviousReply(agent.session,message));
     refreshSearchToolBaseline(agent.ctx,agent.session,pending.get(sid)?.modelSearchTurn);
     await syncExtensions(agent,key,messages);
     if(search && !sessionHasSearch(agent.session,search.ticket))messages.unshift(createUserMessage({content:[{type:'text',text:search.text}],
@@ -417,8 +477,21 @@ export function apply(ctx, config={}) {
     const reply=(code,body)=>{if(!res.destroyed){res.writeHead(code,{'content-type':'application/json; charset=utf-8'});res.end(JSON.stringify(body));}};
     const supplied=Buffer.from(String(req.headers.authorization ?? '').replace(/^Bearer /i,'')), expected=Buffer.from(token);
     if(supplied.length!==expected.length || !crypto.timingSafeEqual(supplied,expected))return reply(401,{error:'unauthorized'});
-    if(req.method==='GET' && req.url==='/health')return reply(200,{ok:accountReady(),accountScope:loadedAccount.id,messageSource:'wechat-social-bridge',project:'WeChatAgent',projectRoot:root,extensionApiVersion:1,provider,model,pluginRevision:new URL(import.meta.url).searchParams.get('wechatagent')??'',contextMode:'native-session-v1',contextMaintenance:'idle-threshold-v1',promptContext:PROMPT_POLICY,sessionNaming:true,imageInput:'native-attachment-v1',replyText:'final-message-v1',imageRecovery:'per-image-v1',imageOffloadMode:'after-turn-v1',sessionLifecycle:'archive-rotation-v1',turnRecovery:'cancel-on-timeout-v1',builtinSkills:'web-reader-v1',webPriceRead:'zxsj-api-v1',searchTool:'model-search-v1',searchRoute:'dsh-native-only-v1',dshAccess:'per-chat-v1',memberMemory:'group-scoped-json-v1',stickerPoolReview:'ds-select-v1',searchBudget:'per-turn-count-v1',searchReasoning:'model-default-v1',toolIsolation:SOCIAL_TOOL_ISOLATION,pendingTurns:pending.size,behaviorPolicy:BEHAVIOR_POLICY,coherencePolicy:COHERENCE_POLICY});
+    if(req.method==='GET' && req.url==='/health')return reply(200,{ok:accountReady(),accountScope:loadedAccount.id,messageSource:'wechat-social-bridge',project:'WeChatAgent',projectRoot:root,extensionApiVersion:1,provider,model,pluginRevision:new URL(import.meta.url).searchParams.get('wechatagent')??'',contextMode:'native-session-v1',contextMaintenance:'idle-threshold-v1',promptContext:PROMPT_POLICY,sessionNaming:true,sessionGroups:'dsh-workspace-v1',imageInput:'native-attachment-v1',replyText:'final-message-v1',imageRecovery:'per-image-v1',imageOffloadMode:'after-turn-v1',sessionLifecycle:'archive-rotation-v1',turnRecovery:'cancel-on-timeout-v1',builtinSkills:'web-reader-v1',webPriceRead:'zxsj-api-v1',searchTool:'model-search-v1',searchRoute:'dsh-native-only-v1',dshAccess:'per-chat-v1',memberMemory:'group-scoped-json-v1',stickerPoolReview:'ds-select-v1',searchBudget:'per-turn-count-v1',searchReasoning:'model-default-v1',toolIsolation:SOCIAL_TOOL_ISOLATION,pendingTurns:pending.size,behaviorPolicy:BEHAVIOR_POLICY,coherencePolicy:COHERENCE_POLICY});
     if(!accountReady())return reply(409,{error:'account_changed',detail:'ACCOUNT_SWITCH_REQUIRES_DSH_RESTART'});
+    if(req.method==='GET'&&req.url==='/session-groups'){
+      try{return reply(200,{...sessionGroups.snapshot(),assignments:Object.fromEntries(Object.entries(profiles).filter(([,profile])=>profile.workspaceId).map(([key,profile])=>[key,profile.workspaceId]))});}catch(error){return reply(error.status??503,{error:error.code??'SESSION_GROUP_UNAVAILABLE'});}
+    }
+    if(req.method==='POST'&&/^\/session-groups\/(create|rename|delete|move)$/.test(req.url)){
+      const controller=new AbortController(),closed=()=>{if(!res.writableEnded)controller.abort();};res.once('close',closed);
+      try{
+        const chunks=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>8192)throw groupFault('SESSION_GROUP_INVALID_REQUEST',400);chunks.push(chunk);}
+        const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if(!body||typeof body!=='object'||Array.isArray(body))throw groupFault('SESSION_GROUP_INVALID_REQUEST',400);
+        return reply(200,await sessionGroups.run(req.url.split('/').at(-1),body,controller.signal));
+      }catch(error){log.warn('workspace group request failed:',error.message);return reply(error.status??503,{error:error.code??'SESSION_GROUP_OPERATION_FAILED'});}
+      finally{res.removeListener('close',closed);}
+    }
     if(req.method==='POST'&&req.url==='/sticker-pool-review') {
       try {
         let raw='';for await(const chunk of req){raw+=chunk.toString('utf8');if(raw.length>1024)throw Error('request_too_large');}
@@ -432,7 +505,7 @@ export function apply(ctx, config={}) {
     if(req.method==='GET'&&req.url==='/dsh-catalog'){try{return reply(200,await dshCatalog(ctx,{cwd:config.cwd??process.cwd(),signal:AbortSignal.timeout(4000)}));}catch{return reply(503,{error:'dsh_catalog_unavailable'});}}
     if(req.method==='GET'&&req.url==='/meme-library/status')return reply(200,await memeLibrary.status());
     if(req.method==='GET' && req.url==='/skills')return reply(200,{skills:[builtinWebReader(),builtinModelSearch()]});
-    if(req.method==='GET' && req.url==='/sessions')return reply(200,{sessions:Object.entries(mappings).map(([key,sid])=>({conversationKey:key,sessionId:sid,title:profiles[key]?.title ?? sessionTitle(key),initializations:profiles[key]?.initializations ?? 0,compactions:profiles[key]?.compactions ?? 0,generation:profiles[key]?.generation ?? 0,previousSessionCount:profiles[key]?.previousSessions?.length ?? 0,recovery:profiles[key]?.recovery??null,...contextStatus(key,sid),contextAuto:profiles[key]?.contextAuto ? {status:profiles[key].contextAuto.status,finishedAt:profiles[key].contextAuto.finishedAt,retryAt:profiles[key].contextAuto.retryAt} : null}))});
+    if(req.method==='GET' && req.url==='/sessions')return reply(200,{sessions:Object.entries(mappings).map(([key,sid])=>({conversationKey:key,sessionId:sid,groupId:sessionGroups.groupFor(sid,profiles[key])?.id??null,title:profiles[key]?.title ?? sessionTitle(key),initializations:profiles[key]?.initializations ?? 0,compactions:profiles[key]?.compactions ?? 0,generation:profiles[key]?.generation ?? 0,previousSessionCount:profiles[key]?.previousSessions?.length ?? 0,recovery:profiles[key]?.recovery??null,...contextStatus(key,sid),contextAuto:profiles[key]?.contextAuto ? {status:profiles[key].contextAuto.status,finishedAt:profiles[key].contextAuto.finishedAt,retryAt:profiles[key].contextAuto.retryAt} : null}))});
     if(req.method!=='POST' || !['/followup','/configure','/compact','/context-maintenance'].includes(req.url))return reply(404,{error:'not_found'});
     const requestController=new AbortController();
     const disconnected=()=>{if(!res.writableEnded)requestController.abort(Object.assign(new Error('request_closed'),{name:'AbortError'}));};

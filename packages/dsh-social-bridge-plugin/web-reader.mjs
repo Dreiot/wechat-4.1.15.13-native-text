@@ -7,6 +7,8 @@ import { isZxsjPricePage, zxsjQuoteHints, readZxsjPricePage, fetchZxsjQuotes } f
 
 const skill = JSON.parse(fs.readFileSync(new URL('./skills/web-reader/skill.json', import.meta.url), 'utf8'));
 const instructions = fs.readFileSync(new URL('./skills/web-reader/SKILL.md', import.meta.url), 'utf8');
+const quoteInstructions = fs.readFileSync(new URL('./skills/web-reader/references/quotes.md', import.meta.url), 'utf8');
+const videoInstructions = fs.readFileSync(new URL('./skills/web-reader/references/video.md', import.meta.url), 'utf8');
 
 export function localWebReaderEnabled(root, key) {
   try {
@@ -26,7 +28,12 @@ export function createWebReaderTurn(message, suppliedUrls) {
 }
 
 export function webReaderInstructions(root, key, turn) {
-  return turn.urls.size && localWebReaderEnabled(root, key) ? `[内置技能 ${skill.name}]\n${instructions}` : '';
+  if (!turn?.urls.size || !localWebReaderEnabled(root, key)) return '';
+  const urls = [...turn.urls];
+  return [`[内置技能 ${skill.name}]\n${instructions}`,
+    urls.some(url => isZxsjPricePage(url)) ? quoteInstructions : '',
+    urls.some(url => /(^|\.)bilibili\.com$|^b23\.tv$/i.test(new URL(url).hostname)) ? videoInstructions : '',
+  ].filter(Boolean).join('\n');
 }
 
 export function bindWebReader(agentCtx, root, key, turnFor, fetchPage = fetchWebPage, {fetchQuotes=fetchZxsjQuotes}={}) {

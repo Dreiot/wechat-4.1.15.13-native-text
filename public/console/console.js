@@ -1,17 +1,22 @@
 'use strict';
 import { personaError, decodePersonaFile, MAX_PERSONA_BYTES } from './persona-files.mjs';
+import {createPersonaDeletion} from './persona-delete.js';
+import {dshInstallCard} from './dsh-install.mjs';
+import {createSessionGroupUI} from './session-groups.js';
 import { initAppearance } from './appearance.js';
 import { installExternalLinks } from './external-links.js';
 import { startUpdateUI } from './updates.js';
 import { createExtensionUI } from './extensions.js';
 import {createStickerManagerUI} from './sticker-manager.js';
 import {mergeConversationSave} from './conversation-settings.mjs';
-import {openProcessRecovery} from './process-recovery.js';
+import {openProcessRecovery,needsWeChatRepair} from './process-recovery.js';
 const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const icon = name => `<svg aria-hidden="true"><use href="/icons.svg#${name}"></use></svg>`;
 const state = { token: '', config: null, draft: null, revision: '', page: 'overview', roles: [], roleDrafts: new Map(), selectedRole: '', chatKind: 'private', names: new Map(), status: null, job: null, logs: null, loading: false, reader: null };
 const roleSaves = new Map();
+const sessionGroupUI=createSessionGroupUI({api,modal,closeModal,escapeHtml,icon,renderPage,toast});
+const deletePersona=createPersonaDeletion({state,roleSaves,api,modal,closeModal,escapeHtml,renderPage,updateDraftUI,toast});
 installExternalLinks({report:message=>toast(message)});
 const extensionUI = createExtensionUI({api,modal,closeModal,confirmAction,escapeHtml,icon,state,renderPage,toast,onDshSave:(result,key)=>{state.draft=mergeConversationSave(state.config,state.draft,result.config,key);state.config=result.config;state.revision=result.revision;updateDraftUI();refreshStatus();},onProjectSave:syncExtensionProject});
 const stickerManagerUI=createStickerManagerUI({api,modal,closeModal,escapeHtml,icon,state,renderPage,toast});
@@ -86,6 +91,7 @@ function updateDraftUI() {
     $('#save-role').textContent = savingRole ? '正在保存…' : '保存人格';
     $('#role-edit-status').textContent = savingRole ? '正在保存' : state.roleDrafts.has(state.selectedRole) ? '有未保存的修改' : '已保存';
   }
+  if($('#delete-role'))$('#delete-role').disabled=state.savingAll||roleSaves.size>0||!!state.deletingRole||state.job?.state==='running';
 }
 async function api(route, body, retry = true) {
   const response = await fetch(route, { method: body === undefined ? 'GET' : 'POST', headers: { 'X-Console-Token': state.token, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(route === '/api/browse' ? 180000 : 20000) });
@@ -234,7 +240,7 @@ function rolesPage() {
   if (!selected) return toolbar + `<section class="card">${empty('创建或导入第一个人格', '新建一个人格，或导入已有的 Markdown 人格文件。', '', 'person')}</section>`;
   state.selectedRole = selected.name;
   const content = state.roleDrafts.get(selected.name)?.content ?? selected.content;
-  return toolbar + `<div class="role-layout"><div class="role-list">${state.roles.map(r => `<button class="role-item ${r.name === selected.name ? 'selected' : ''}" data-role="${escapeHtml(r.name)}" aria-pressed="${r.name === selected.name}"><strong>${escapeHtml(r.name)}</strong><small>${state.draft.persona.default === r.name ? '用于跟随默认的聊天' : '可指定给好友或群聊'}</small>${state.draft.persona.default === r.name ? '<span class="status-tag ok">默认人格</span>' : ''}</button>`).join('')}</div><section class="card">${header(escapeHtml(selected.name), '直接修改下面的内容，点击“保存人格”，再重启服务应用。')}<label class="field-label" for="role-content">人格内容</label><textarea class="role-editor" id="role-content" aria-describedby="role-save-help">${escapeHtml(content)}</textarea><div class="role-editor-toolbar"><div class="role-editor-meta"><span class="subtle" id="role-char-count">${content.length} 字</span><span class="subtle" id="role-edit-status" role="status">已保存</span></div><div class="button-row"><button class="button" id="set-default-role" ${state.draft.persona.default === selected.name ? 'disabled' : ''}>${icon('check')}${state.draft.persona.default === selected.name ? '已是默认人格' : '设为默认人格'}</button><button class="button primary" id="save-role" disabled>保存人格</button></div></div><div id="role-save-error" class="inline-error" role="alert"></div><p class="subtle" id="role-save-help">保存仅提交当前人格，其他页面的草稿会保留。修改前的内容会自动备份。</p></section></div>`;
+  return toolbar + `<div class="role-layout"><div class="role-list">${state.roles.map(r => `<button class="role-item ${r.name === selected.name ? 'selected' : ''}" data-role="${escapeHtml(r.name)}" aria-pressed="${r.name === selected.name}"><strong>${escapeHtml(r.name)}</strong><small>${state.draft.persona.default === r.name ? '用于跟随默认的聊天' : '可指定给好友或群聊'}</small>${state.draft.persona.default === r.name ? '<span class="status-tag ok">默认人格</span>' : ''}</button>`).join('')}</div><section class="card">${header(escapeHtml(selected.name), '直接修改下面的内容，点击“保存人格”，再重启服务应用。')}<label class="field-label" for="role-content">人格内容</label><textarea class="role-editor" id="role-content" aria-describedby="role-save-help">${escapeHtml(content)}</textarea><div class="role-editor-toolbar"><div class="role-editor-meta"><span class="subtle" id="role-char-count">${content.length} 字</span><span class="subtle" id="role-edit-status" role="status">已保存</span></div><div class="button-row"><button class="button" id="set-default-role" ${state.draft.persona.default === selected.name ? 'disabled' : ''}>${icon('check')}${state.draft.persona.default === selected.name ? '已是默认人格' : '设为默认人格'}</button><button class="button danger" id="delete-role">删除人设卡</button><button class="button primary" id="save-role" disabled>保存人格</button></div></div><div id="role-save-error" class="inline-error" role="alert"></div><p class="subtle" id="role-save-help">保存仅提交当前人格，其他页面的草稿会保留。修改前的内容会自动备份。</p></section></div>`;
 }
 async function persistRole(name) {
   if (roleSaves.has(name)) return roleSaves.get(name);
@@ -375,18 +381,20 @@ function toolsPage() {
   return `<div class="tool-grid"><section class="card">${header('启动与配置', '', '', 'power')}${row('打开匹配微信', '校验并打开已准备的微信，随后在微信中登录。', 'wechat-open', '打开')}${row('准备项目配置', '更新连接配置与 DSH 插件的模型设置。', 'prepare', '准备')}${row('安装项目依赖', '按原安装脚本安装读取器与插件依赖。', 'setup', '安装')}</section><section class="card">${header('连接诊断', '', '', 'plug')}${row('检查数据库读取', '核验当前账号、数据库目录与读取凭据。', 'reader-check', '检查')}${row('检查后台发送', '只检查匹配版本、发送后端与账号是否就绪。', 'hook-check', '检查')}<div class="tool-row"><div><h3>修复微信连接</h3><p>组件无法初始化时，核对并再次确认后重开匹配微信，可能需要重新登录。</p></div><button class="button" data-repair-wechat>修复…</button></div><div class="tool-row"><div><h3>模型或端口更改已处理</h3><p>从 DSH 托盘菜单完全退出并重新打开后，点击确认，然后重启服务。</p></div><button class="button" id="ack-dsh">已重开 DSH</button></div></section><section class="card">${header('发送组件', '', '', 'tool')}${row('构建原生发送组件', '需已有匹配源码和 C++ 构建工具。', 'hook-build', '构建')}</section><section class="card">${header('客户端维护', '', '', 'shield')}${row('开启客户端写保护', '只作用于项目 state/hook 下的客户端目录。', 'hook-pin', '开启')}${row('解除客户端写保护', '恢复原有目录权限；不修改版本适配。', 'hook-unpin', '解除')}<p class="subtle space-top">目录保护不保证旧版微信持续可登录。</p></section></div>`;
 }
 function setupPage() {
-  return `<div class="section-stack"><div class="notice plain">${icon('shield')}<span>此安装包使用独立的本机数据目录。账号、读取凭据和聊天范围需要由你配置，初始聊天范围为空。</span></div><div class="tool-grid">
+  return `<div class="section-stack"><div class="notice plain">${icon('shield')}<span>此安装包使用独立的本机数据目录。账号、读取凭据和聊天范围需要由你配置，初始聊天范围为空。</span></div><div class="tool-grid setup-grid">
     <section class="card">${header('检查运行环境', 'Node.js、Python 和读取依赖均已内置。', '', 'check')}<p class="modal-description">不需要安装开发工具或系统 Python。可先检查安装文件是否完整。</p><button class="button" data-action="setup">验证内置环境</button></section>
     <section class="card">${header('登录匹配微信', '使用安装包准备的独立匹配客户端。', '', 'chat')}<p class="modal-description">打开微信并登录自己的账号，等待消息同步。目前发送组件适配 4.1.10.27；如果微信要求升级，请保留提示并检查兼容性。</p><button class="button" data-action="wechat-open">打开微信</button> <button class="button" data-repair-wechat>修复微信连接…</button></section>
-    <section class="card">${header('连接 DSH', '登录你自己的模型账号，添加本机插件。', '', 'plug')}<p class="modal-description">打开 DSH，在插件页面添加本应用的插件目录。添加并启用后，从托盘完整退出并重新打开 DSH。</p>${pluginPathField()}<div class="button-row space-top"><button class="button" data-action="dsh-open">打开 DSH</button><button class="button" id="open-plugin-folder">打开插件目录</button></div></section>
+    ${dshInstallCard({header,field,pluginPathField})}
     </div>${readerConfigurationCard()}<section class="card">${header('启动并选择聊天范围', '数据库显示“已验证”并完成模型连接后，启动服务。', '', 'power')}<p class="modal-description">启动后，在“聊天范围”搜索自己的好友或群聊。添加后保存并重启，助手只会处理允许的聊天。</p><div class="button-row"><button class="button primary" data-action="start">启动服务</button><a class="button" href="#chats">选择聊天范围</a><a class="button" href="#overview">查看连接状态</a></div></section></div>`;
 }
 async function sessionsPage() {
-  const { sessions } = await api('/api/sessions');
+  const [{sessions},groups]=await Promise.all([api('/api/sessions'),api('/api/session-groups')]);
   const allowed = new Set([...state.config.wechat.whitelist.private.map(id => 'wechat:private:' + id), ...state.config.wechat.whitelist.groups.map(id => 'wechat:group:' + id)]);
-  const list = sessions.filter(session => allowed.has(session.conversationKey));
-  const missing = [...allowed].filter(key => !list.some(session => session.conversationKey === key));
-  return `<div class="section-stack"><div class="notice plain">${icon('info')}<span>压缩保留当前会话，需要额外调用模型。要归档会话，请在 DSH 中归档；新消息会按现有规则创建新会话。</span></div>${list.length ? `<div class="session-grid">${list.map(session => `<section class="card session-card">${header(escapeHtml(session.title || state.names.get(session.conversationKey) || session.conversationKey), '', '<span class="status-tag ok">独立上下文</span>')}<div class="session-id">${escapeHtml(session.conversationKey)}</div><div class="session-id">Session · ${escapeHtml(session.sessionId)}</div><div class="session-details"><div><strong>${session.initializations}</strong><span>人格初始化</span></div><div><strong>${session.compactions}</strong><span>上下文压缩</span></div><div><strong>${session.previousSessionCount}</strong><span>历史会话</span></div></div><p class="context-session-status">当前上下文：${Number.isSafeInteger(session.contextTokens)?session.contextTokens.toLocaleString()+" token":"等待统计"}${session.contextTokenSource==="estimated"?"（估算）":""} · 阈值：${state.draft.wechat.context?.chats?.[session.conversationKey]===0?"本聊天关闭":(state.draft.wechat.context?.chats?.[session.conversationKey]??getPath(state.draft,"wechat.context.maxTokens")).toLocaleString()+" token"}${session.contextAuto?.status==="compacting"?" · 正在压缩":session.contextAuto?.status==="failed"?" · 等待重试":""}</p>${conversationSummary(session.conversationKey)}<div class="button-row session-actions"><button class="button" data-chat-settings="${session.conversationKey}">${icon('sliders')}会话设置</button><button class="button" data-dsh-chat="${session.conversationKey}">${icon('plug')}技能与工具</button><button class="button" data-action="sessions-configure" data-key="${session.conversationKey}">同步名称</button><button class="button" data-action="sessions-compact" data-key="${session.conversationKey}">${icon('history')}压缩上下文</button></div></section>`).join('')}</div>` : `<section class="card">${empty('还没有已允许聊天的原生会话', '收到新消息后会自动建立；也可以用下方按钮初始化已保存的聊天。', '', 'history')}</section>`}${missing.length ? `<section class="card">${header('等待初始化的聊天')}<div class="section-stack">${missing.map(key => `<div class="tool-row"><div><h3>${escapeHtml(state.names.get(key) || key)}</h3><p>名称来自读取服务；当前聊天需已同步到电脑微信。</p></div><div class="button-row"><button class="button" data-chat-settings="${key}">会话设置</button><button class="button" data-action="sessions-configure" data-key="${key}">初始化会话</button></div></div>`).join('')}</div></section>` : ''}</div>`;
+  const all = sessions.filter(session => allowed.has(session.conversationKey));
+  sessionGroupUI.prepare(groups,all,allowed);
+  const list=all.filter(session=>sessionGroupUI.visible(session.conversationKey));
+  const missing=[...allowed].filter(key=>!all.some(session=>session.conversationKey===key)&&sessionGroupUI.visible(key));
+  return `<div class="section-stack">${sessionGroupUI.toolbar()}<div class="notice plain">${icon('info')}<span>压缩保留当前会话，需要额外调用模型。要归档会话，请在 DSH 中归档；新消息会按现有规则创建新会话。</span></div>${list.length ? `<div class="session-grid">${list.map(session => `<section class="card session-card">${header(escapeHtml(session.title || state.names.get(session.conversationKey) || session.conversationKey), '', '<span class="status-tag ok">独立上下文</span>')}<div class="session-id">${escapeHtml(session.conversationKey)}</div><div class="session-id">Session · ${escapeHtml(session.sessionId)}</div><div class="session-details"><div><strong>${session.initializations}</strong><span>人格初始化</span></div><div><strong>${session.compactions}</strong><span>上下文压缩</span></div><div><strong>${session.previousSessionCount}</strong><span>历史会话</span></div></div><p class="context-session-status">当前上下文：${Number.isSafeInteger(session.contextTokens)?session.contextTokens.toLocaleString()+" token":"等待统计"}${session.contextTokenSource==="estimated"?"（估算）":""} · 阈值：${state.draft.wechat.context?.chats?.[session.conversationKey]===0?"本聊天关闭":(state.draft.wechat.context?.chats?.[session.conversationKey]??getPath(state.draft,"wechat.context.maxTokens")).toLocaleString()+" token"}${session.contextAuto?.status==="compacting"?" · 正在压缩":session.contextAuto?.status==="failed"?" · 等待重试":""}</p>${conversationSummary(session.conversationKey)}${sessionGroupUI.control(session.conversationKey)}<div class="button-row session-actions"><button class="button" data-chat-settings="${session.conversationKey}">${icon('sliders')}会话设置</button><button class="button" data-dsh-chat="${session.conversationKey}">${icon('plug')}技能与工具</button><button class="button" data-action="sessions-configure" data-key="${session.conversationKey}">同步名称</button><button class="button" data-action="sessions-compact" data-key="${session.conversationKey}">${icon('history')}压缩上下文</button></div></section>`).join('')}</div>` : `<section class="card">${empty('当前分组还没有会话', '可将已有会话移动到此分组，或初始化下方已允许的聊天。', '', 'history')}</section>`}${missing.length ? `<section class="card">${header('等待初始化的聊天')}<div class="section-stack">${missing.map(key => `<div class="tool-row"><div><h3>${escapeHtml(state.names.get(key) || key)}</h3><p>名称来自读取服务；当前聊天需已同步到电脑微信。</p></div><div class="button-row"><button class="button" data-chat-settings="${key}">会话设置</button><button class="button" data-action="sessions-configure" data-key="${key}">初始化会话</button></div></div>${sessionGroupUI.control(key)}`).join('')}</div></section>` : ''}</div>`;
 }
 async function logsPage() {
   state.logs = await api('/api/logs' + (state.logs?.file ? '?file=' + encodeURIComponent(state.logs.file) : ''));
@@ -474,7 +482,7 @@ function paintJob() {
   $('#job-state').textContent = running ? '正在执行 · 可收起此窗口' : job.state === 'succeeded' ? '操作成功' : `操作未完成 · 退出码 ${job.exitCode}`;
   $('#job-retry').hidden = job.state !== 'failed';
   $('#job-recovery').hidden = job.state !== 'failed';
-  $('#job-recovery').textContent = /HOOK_CLIENT_UNHEALTHY|HOOK_INITIALIZATION_TIMEOUT|HOOK_NOT_LISTENING|HOOK_COMPONENT_UPDATE_PENDING|HOOK_AUTH_FAILED/.test(job.output??'') ? '修复微信连接' : '检查占用进程';
+  $('#job-recovery').textContent = needsWeChatRepair(job.output) ? '修复微信连接' : '检查占用进程';
   $('#job-recovery').dataset.hookRepair = String($('#job-recovery').textContent === '修复微信连接');
   $('#activity-button').hidden = false;
   document.querySelectorAll('[data-action]').forEach(button => { button.disabled = running; }); updateDraftUI(); paintStatus(); paintReaderSetup();
@@ -620,6 +628,7 @@ document.addEventListener('click', event => {
     if(hasDraft())return toast('请先保存或放弃草稿，再修复微信连接。');
     return openProcessRecovery({api,modal,refreshStatus,toast,repairWeChat:true,onRecovered:async()=>{closeModal();await runAction('wechat-open');}});
   }
+  if(sessionGroupUI.click(button))return;
   if(button.matches('[data-process-recovery]')||button.id==='job-recovery')return openProcessRecovery({api,modal,refreshStatus,toast});
   if (button.hasAttribute('data-close')) return closeModal();
   if (button.dataset.action) return runAction(button.dataset.action, button.dataset.key);
@@ -633,6 +642,7 @@ document.addEventListener('click', event => {
   if (button.id === 'new-role') return newRole();
   if (button.id === 'import-role') return importRole();
   if (button.id === 'save-role') return saveRole();
+  if (button.id === 'delete-role') return deletePersona();
   if (button.id === 'set-default-role') { state.draft.persona.default = state.selectedRole; renderPage(); updateDraftUI(); return; }
   if (button.id === 'save-reader') return saveReader();
   if (button.id === 'detect-reader') return discoverReader(true);
@@ -680,7 +690,7 @@ if (window.desktop) {
   document.body.classList.add('desktop-mode');
   $('.brand span').textContent = '桌面应用';
   $('.breadcrumb > span:first-of-type').textContent = 'WeChatAgent';
-  $('.version').textContent = '0.3.8 · 关闭窗口收起到托盘';
+  $('.version').textContent = '0.3.9 · 关闭窗口收起到托盘';
   $('#quit-console').textContent = '退出应用';
 }
 document.addEventListener('click', event => { if (document.body.classList.contains('nav-open') && !event.target.closest('.sidebar') && !event.target.closest('#menu-button')) {document.body.classList.remove('nav-open');paintNavigation();} });

@@ -12,12 +12,19 @@ const stateFiles = ['social-messages.json', 'sticker-delivery-pending.json', 'te
 const chatFeatures = ['stickers', 'search', 'proactive', 'context', 'memeLibrary', 'memberMemory'];
 const protectedKey = key => typeof key === 'string' && /^userdpapi:[A-Za-z0-9+/=]+$/.test(key);
 
-export function readerAccountId(root, settings) {
+export function readerAccountDirectory(root, settings) {
   if (!settings?.dbPath || !settings.myWxid || /^(safe:|userdpapi:)/.test(settings.dbPath)) return '';
   let directory = path.resolve(root, settings.dbPath);
+  if (path.basename(directory).toLowerCase() === 'db_storage') directory = path.dirname(directory);
   if (!fs.existsSync(path.join(directory, 'db_storage')) && path.basename(directory).toLowerCase() !== settings.myWxid.toLowerCase()) directory = path.join(directory, settings.myWxid);
   if (fs.existsSync(directory)) directory = fs.realpathSync(directory);
   if (process.platform === 'win32') directory = directory.toLowerCase();
+  return directory;
+}
+
+export function readerAccountId(root, settings) {
+  const directory = readerAccountDirectory(root, settings);
+  if (!directory) return '';
   return crypto.createHash('sha256').update(directory).digest('hex');
 }
 

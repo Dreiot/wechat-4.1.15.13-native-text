@@ -2,9 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
+import { DSH_SDK_VERSION,DSH_INSTALL_URL } from '../public/console/dsh-install.mjs';
 import { spawnSync } from 'node:child_process';
 import { buildIcons, embedExecutableIcon } from './build-icons.mjs';
+import { singleDirectoryTemplate } from './installer-directory-page.mjs';
 import { projectRoot as root } from './project-config.mjs';
 
 const version = JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8')).version;
@@ -13,20 +14,10 @@ const appDir = path.join(stage, 'app');
 const project = path.join(stage, 'project');
 const vendor = path.join(stage, 'vendor');
 const require = createRequire(path.join(root, 'package.json'));
-const asar = await import(pathToFileURL(require.resolve('@electron/asar')).href);
-const dshCandidates = [process.env.WECHATAGENT_DSH_SOURCE].filter(Boolean);
-let dsh, dshPackage;
-for (const candidate of dshCandidates) {
-  try {
-    const metadata=JSON.parse(asar.extractFile(path.join(candidate,'resources/app.asar'),'package.json').toString('utf8'));
-    if (metadata.version === '0.2.0-rc.2') { dsh=candidate; dshPackage=metadata; break; }
-  } catch {}
-}
-if (!dsh) throw new Error('A verified DSH 0.2.0-rc.2 source is required; no staging directories changed.');
 const pluginPackage = JSON.parse(fs.readFileSync(path.join(root,'packages/dsh-social-bridge-plugin/package.json'),'utf8'));
 const sdkPackage = JSON.parse(fs.readFileSync(path.join(root,'packages/dsh-social-bridge-plugin/node_modules/@deepseek-ai/dsh-llm/package.json'),'utf8'));
-if (pluginPackage.dependencies['@deepseek-ai/dsh-llm'] !== dshPackage.version || sdkPackage.version !== dshPackage.version) throw new Error('DSH runtime and installed plugin SDK must match before staging.');
-console.log('Bundling compatible DSH '+dshPackage.version+' from '+dsh);
+if (pluginPackage.dependencies['@deepseek-ai/dsh-llm'] !== DSH_SDK_VERSION || sdkPackage.version !== DSH_SDK_VERSION) throw new Error('Installed plugin SDK must match the declared DSH compatibility version.');
+console.log('DSH desktop is external; only the bridge plugin and SDK '+DSH_SDK_VERSION+' are included.');
 for (const dir of [appDir, project, vendor]) {
   const resolved = path.resolve(dir);
   if (!resolved.startsWith(path.resolve(stage) + path.sep)) throw new Error('Invalid release staging directory');
@@ -64,10 +55,16 @@ add('docs/STICKER_MANAGER.md');
 add('docs/EXIT_SHUTDOWN.md');
 add('docs/DATA_STORAGE.md');
 add('docs/HOOK_STARTUP_RECOVERY.md');
+add('docs/PORT_STARTUP_RECOVERY.md');
+add('docs/REPLY_PROTOCOL.md');
+add('docs/PROMPT_POLICY.md');
+add('docs/EXTERNAL_DSH.md');
+add('docs/ACCOUNT_SWITCH.md');
+add('docs/SESSION_GROUPS.md');
 add('scripts/hook-client-health.ps1');
 add('scripts/stop-legacy-services.ps1');
 const scriptNames = ['project-config.mjs','extension-status.mjs','bundled-extensions.mjs','update-check.mjs','migrate-io-config.mjs','manage.ps1','console-server.mjs','console-process.mjs','console-powershell.ps1','console-native.ps1','sync-weflow.cjs','hook-onebot.mjs','reader-api.py','reader-requirements.txt','wechat_media.py','wechat_sticker.py','wechat_sticker_send.py','wechat_forwarded.py','resolve-wechat-image.py','list-friend-ids.mjs','manage-dsh-sessions.mjs','launch-hook-wechat.ps1','pin-hook-client.ps1','launch-dsh.ps1','check-runtime.ps1','setup.ps1','build-hook.ps1'];
-for (const name of [...scriptNames, 'wechat_group_bindings.py', 'dsh-configuration.mjs', 'process-recovery.mjs', 'process-recovery.ps1', 'check-runtime.py', 'wechat_meme_library.py', 'wechat_sticker_labels.py', 'wechat_image_normalize.py', 'wechat_sticker_collection.py', 'wechat_quote.py', 'text-delivery-store.mjs', 'reader-setup.mjs', 'reader_setup.py', 'reader-account-state.mjs']) add('scripts/' + name);
+for (const name of [...scriptNames, 'wechat_group_bindings.py', 'dsh-configuration.mjs', 'process-recovery.mjs', 'process-recovery.ps1', 'check-runtime.py', 'wechat_meme_library.py', 'wechat_sticker_labels.py', 'wechat_image_normalize.py', 'wechat_sticker_collection.py', 'wechat_quote.py', 'text-delivery-store.mjs', 'reader-setup.mjs', 'reader_setup.py', 'reader-account-state.mjs','wechat-account-check.mjs']) add('scripts/' + name);
 addTree('scripts/native-hook');
 for (const name of ['nt_decrypt.py','nt_common.py']) add('components/weflow-cli/scripts/' + name);
 add('components/weflow-cli/LICENSE');
@@ -94,20 +91,19 @@ const clientSource = path.join(root, 'state/hook/wechat-4.1.10.27');
 copyFile(path.join(clientSource, 'Weixin.exe'), path.join(vendor, 'wechat/Weixin.exe'));
 copyTree(path.join(clientSource, '4.1.10.27'), path.join(vendor, 'wechat/4.1.10.27'), name => !/\.disabled$|\.log$|\.token$/.test(name));
 for (const name of ['version.dll','build.json']) copyFile(path.join(root, 'state/hook/native', name), path.join(vendor, 'hook', name));
-copyTree(dsh, path.join(vendor, 'dsh'), (name, dir) => dir ? ['locales','resources','app.asar.unpacked','runtime','bin','primary-runtime','pnpm','office-skills','node_modules','versions','dependencies','native','node','python'].includes(name) || !['Cache','GPUCache','User Data','logs','state'].includes(name) : !/debug\.log|Uninstall|app-update\.yml|\.token$|^\.env$/i.test(name));
 const fileList = [...new Set(files)].sort();
 const sourceHashes = Object.fromEntries(fileList.map(file => [file, sha(fs.readFileSync(path.join(project,file)))]));
 const desktopHashes = Object.fromEntries(fs.readdirSync(appDir).filter(file=>fs.statSync(path.join(appDir,file)).isFile()).sort().map(file=>[file,sha(fs.readFileSync(path.join(appDir,file)))]));
-const runtimeRevision = sha(Buffer.from(JSON.stringify({node:sha(fs.readFileSync(process.execPath)),python:fs.readFileSync(path.join(stage,'runtime/python/DEPENDENCIES.json'),'utf8'),dsh:sha(fs.readFileSync(path.join(dsh,'resources/app.asar')))}))).slice(0,12);
+const runtimeRevision = sha(Buffer.from(JSON.stringify({node:sha(fs.readFileSync(process.execPath)),python:fs.readFileSync(path.join(stage,'runtime/python/DEPENDENCIES.json'),'utf8')}))).slice(0,12);
 const buildId = sha(Buffer.from(JSON.stringify({sourceHashes,desktopHashes,runtimeRevision,hook:sha(fs.readFileSync(path.join(vendor,'hook/version.dll')))}))).slice(0,16);
-fs.writeFileSync(path.join(project, 'deployment.json'), JSON.stringify({ version, buildId, builtAt:new Date().toISOString(), runtimeRevision, sourceHashes, files:fileList, presets:presetNames.map(name=>name.slice(0,-3)), node:process.version, python:'3.13.16', dshVersion:dshPackage.version, privateAccountDataIncluded:false, authorization:'Maintainer confirmed redistribution authorization for all currently used components and requested all current role files as bundled presets on 2026-10-05.' }, null, 2));
+fs.writeFileSync(path.join(project, 'deployment.json'), JSON.stringify({ version, buildId, builtAt:new Date().toISOString(), runtimeRevision, sourceHashes, files:fileList, presets:presetNames.map(name=>name.slice(0,-3)), node:process.version, python:'3.13.16', dshBundled:false,dshSdkVersion:DSH_SDK_VERSION,dshInstallUrl:DSH_INSTALL_URL, privateAccountDataIncluded:false, authorization:'Maintainer confirmed redistribution authorization for all currently used components and requested all current role files as bundled presets on 2026-10-05.' }, null, 2));
 // No personal data can enter the deployment template or vendor programs.
 for (const file of fs.readdirSync(project, { recursive:true })) {
   const relative = String(file).replaceAll('\\','/');
   if (/^state\/|(^|\/)wechatagent\.json$|social-dsh-token|native-token|\.env$|WeFlow-config\.json$/.test(relative)) throw new Error('Private file entered the release: ' + relative);
 }
 for (const file of fs.readdirSync(vendor, { recursive:true })) if (/wechatagent-hook\.token|native-token|social-messages|WeFlow-config\.json|^.*\/\.dsh\//.test(String(file).replaceAll('\\','/'))) throw new Error('Private vendor file entered the release: ' + file);
-const notices = 'WeChatAgent '+version+'\n\nRedistribution authorization for the bundled WeChat client, WeChat-Hook and DSH components was confirmed by the maintainer on 2026-10-05. This statement does not replace their respective license terms.\n\nBundled components: Electron, Node.js, Python 3.13.16, SQLCipher Python binding, cryptography, zstandard, pycryptodome, Pillow, imageio-ffmpeg, cffi, pycparser, MIT weflow-cli NT reader sources, MIT Social Bridge sources and local DSH plugin.\n\nPython and wheel licenses are retained in runtime/python and its site-packages/*.dist-info directories. Electron/Chromium and vendor notices are retained with their programs. Refer to project/LICENSES.md for source attribution and license boundaries. No account, credential, chat or whitelist data is included. Maintainer-authorized persona files are included as presets.\n';
+const notices = 'WeChatAgent '+version+'\n\nRedistribution authorization for the bundled WeChat client and WeChat-Hook components was confirmed by the maintainer on 2026-10-05. This statement does not replace their respective license terms.\n\nBundled components: Electron, Node.js, Python 3.13.16, SQLCipher Python binding, cryptography, zstandard, pycryptodome, Pillow, imageio-ffmpeg, cffi, pycparser, MIT weflow-cli NT reader sources, MIT Social Bridge sources and the local DSH bridge plugin/SDK. The DSH desktop program is installed separately by the user.\n\nPython and wheel licenses are retained in runtime/python and its site-packages/*.dist-info directories. Electron/Chromium and vendor notices are retained with their programs. Refer to project/LICENSES.md for source attribution and license boundaries. No account, credential, chat or whitelist data is included. Maintainer-authorized persona files are included as presets.\n';
 fs.writeFileSync(path.join(appDir, 'THIRD-PARTY-NOTICES.txt'), notices);
 copyFile(path.join(root, 'LICENSE'), path.join(appDir, 'LICENSE.txt'));
 const { build, Platform, Arch } = require('electron-builder');
@@ -121,9 +117,7 @@ multiUser = multiUser.replace(originalFolderLookup, '      # Current-user LocalA
 fs.writeFileSync(path.join(customNsis, 'multiUser.nsh'), multiUser);
 const assistedFile=path.join(customNsis,'assistedInstaller.nsh');
 const assisted=fs.readFileSync(assistedFile,'utf8');
-const directoryPrepare=/    Function instFilesPre[\s\S]*?    FunctionEnd/;
-if(!directoryPrepare.test(assisted))throw new Error('NSIS directory page template differs; inspect before building.');
-fs.writeFileSync(assistedFile,assisted.replace('    !include StrContains.nsh','    # Directory layout is selected by installer-storage.nsh.').replace(directoryPrepare,'    Function instFilesPre\n      # installer-storage.nsh already selected the app subdirectory.\n    FunctionEnd'));
+fs.writeFileSync(assistedFile,singleDirectoryTemplate(assisted));
 // User data is outside the install directory and deleteAppDataOnUninstall is
 // false. Standard removal avoids the legacy uninstaller's atomic rename,
 // which fails across drives and on long bundled LibreOffice file paths.

@@ -3,11 +3,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {createProcessRecovery} from './process-recovery.mjs';
+import {createProcessRecovery,startupConflictPorts} from './process-recovery.mjs';
 import {dshConfigurationMatches} from './dsh-configuration.mjs';
 
 const config={ports:{weflow:5031,onebot:11229,adapter:8766,dshPlugin:11230},hook:{baseUrl:'http://127.0.0.1:30001',wechatExecutable:'state/hook/Weixin.exe'},dsh:{provider:'fixture',model:'fixture-model'}};
 const item={pid:333,name:'node.exe',path:'E:/fixture/node.exe',start:'100',commandHash:'fixture-command',ports:[5031],reason:'占用读取端口',canStop:true};
+test('startup conflicts override stale healthy port caches only for configured ports',()=>{
+ assert.deepEqual(startupConflictPorts('Adapter startup failed: ADAPTER_PORT_IN_USE stage=adapter-port-bind port=8766 system=EADDRINUSE\nSERVICE_PORT_OWNER_MISMATCH service=reader port=5031 owners=33\nSERVICE_PORT_IN_USE port=9999 owners=1',[5031,8766]),[8766,5031]);
+ assert.deepEqual(startupConflictPorts('READER_CONNECTION_RESET port=5031\nchat contains port=8766',[5031,8766]),[]);
+});
 function fixture(){let items=[{...item}],time=1000;const stopped=[];const recovery=createProcessRecovery({root:process.cwd(),now:()=>time,probe:async()=>({items}),stop:async request=>{stopped.push(request);return {stopped:request.items.map(item=>item.pid)};}});return {recovery,stopped,setItems:next=>{items=next;},expire:()=>{time+=120001;}};}
 
 test('inspection and first confirmation never stop a process; final confirmation is explicit and single-use',async()=>{

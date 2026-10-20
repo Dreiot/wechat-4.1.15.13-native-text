@@ -1,4 +1,4 @@
-param([ValidateSet('exe','folder','protect')][string]$Kind)
+param([ValidateSet('exe','folder','workspace','protect')][string]$Kind)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
@@ -11,9 +11,9 @@ if ($Kind -eq 'protect') {
     exit 0
 }
 Add-Type -AssemblyName System.Windows.Forms
-if ($Kind -eq 'folder') {
+if ($Kind -in @('folder','workspace')) {
     $dialog = [Windows.Forms.FolderBrowserDialog]::new()
-    $dialog.Description = 'Select the local WeChat database directory'
+    $dialog.Description = if ($Kind -eq 'workspace') { 'Select the workspace directory' } else { 'Select the local WeChat database directory' }
     $dialog.ShowNewFolderButton = $false
     if ($dialog.ShowDialog() -eq [Windows.Forms.DialogResult]::OK) { [Console]::Write($dialog.SelectedPath) }
 } else {

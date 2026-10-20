@@ -40,7 +40,7 @@ public static class RecoveryProcess {
     if($Mode -eq 'Inspect') {
         $owners=@{}
         foreach($port in @($request.ports)) {
-            foreach($listener in @(Get-NetTCPConnection -LocalPort ([int]$port) -State Listen -ErrorAction SilentlyContinue)) {
+            foreach($listener in @(Get-NetTCPConnection -LocalPort ([int]$port) -ErrorAction SilentlyContinue | Where-Object {[string]$_.State -in @('Listen','Bound') -and $_.LocalAddress -in @('127.0.0.1','0.0.0.0','::')})) {
                 $key=[string]$listener.OwningProcess
                 if(-not $owners.ContainsKey($key)){$owners[$key]=@()};$owners[$key]+=[int]$port
             }
@@ -60,7 +60,7 @@ public static class RecoveryProcess {
             $allowed=$null -ne $identity -and $owner.Sid -eq $userSid -and -not $identity.critical -and $entry.CommandLine -and [int]$key -gt 4 -and [int]$key -ne $PID -and [int]$key -notin @($request.protectedPids)
             if($identity -and $identity.path.StartsWith([IO.Path]::GetFullPath($env:WINDIR)+'\',[StringComparison]::OrdinalIgnoreCase)){$allowed=$false}
             $ports=@($owners[$key]|Sort-Object -Unique)
-            $items+=@{pid=[int]$key;name=$entry.Name;path=if($identity){$identity.path}else{[string]$entry.ExecutablePath};start=if($identity){$identity.start}else{''};commandHash=(Command-Hash $entry.CommandLine);ports=$ports;reason=if($request.matchingWeChatOnly){'配置中的匹配微信，确认后停止并重新打开'}elseif($ports.Count){'占用配置端口 '+($ports -join '、')}else{'另一个微信客户端正在运行'};canStop=[bool]$allowed;blockedReason=if($allowed){''}else{'系统进程、其他用户进程或身份无法核实；请手动处理。'}}
+            $items+=@{pid=[int]$key;name=$entry.Name;path=if($identity){$identity.path}else{[string]$entry.ExecutablePath};start=if($identity){$identity.start}else{''};commandHash=(Command-Hash $entry.CommandLine);ports=$ports;reason=if($request.matchingWeChatOnly){'配置中的匹配微信，确认后停止并重新打开'}elseif($ports.Count){'占用或绑定配置端口 '+($ports -join '、')}else{'另一个微信客户端正在运行'};canStop=[bool]$allowed;blockedReason=if($allowed){''}else{'系统进程、其他用户进程或身份无法核实；请手动处理。'}}
         }
         @{items=$items}|ConvertTo-Json -Depth 5 -Compress
     } else {

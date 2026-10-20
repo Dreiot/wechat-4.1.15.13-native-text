@@ -72,18 +72,60 @@ function Stop-Services {
     }
     if ($stopErrors.Count) { throw ('Managed services could not be stopped: ' + ($stopErrors -join ', ') + '. See state/logs/shutdown.log.') }
 }
-function Start-ServiceProcess([string]$Name,[string]$Exe,[string]$Arguments,[string]$Directory,[string]$Marker,[int]$Port,[bool]$Visible) {
-    if (Test-Port $Port) {
-        $item = $script:record[$Name]
-        if (-not (Owned-Process $item)) { throw ($Name + ' port is used by another installation. Stop that installation before starting WeChatAgent.') }
-        $owners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop | Select-Object -ExpandProperty OwningProcess -Unique)
-        if ($owners -notcontains [int]$item.pid) { throw ('Unexpected owner of ' + $Name + ' port.') }
-        return
+function Get-PortBindings([int]$Port) {
+    try { $connections=@(Get-NetTCPConnection -LocalPort $Port -ErrorAction Stop) }
+    catch {
+        if ($_.FullyQualifiedErrorId -like 'CmdletizationQuery_NotFound*') { return @() }
+        throw ('SERVICE_PORT_INSPECTION_FAILED port='+$Port)
     }
-    $style = if ($Visible) { 'Normal' } else { 'Hidden' }
-    $process = Start-Process -FilePath $Exe -ArgumentList $Arguments -WorkingDirectory $Directory -WindowStyle $style -PassThru -RedirectStandardOutput (Join-Path $stateDir ('logs\'+$Name+'.stdout.log')) -RedirectStandardError (Join-Path $stateDir ('logs\'+$Name+'.stderr.log'))
-    $script:record[$Name] = @{pid=$process.Id;exe=$Exe;marker=$Marker}; Save-Record
-    for ($i=0;$i -lt 80 -and -not (Test-Port $Port);$i++) {
+    # These services bind IPv4 loopback. A separate IPv6-only listener may
+    # legitimately share the number; the IPv4 bind probe remains final.
+    return @($connections | Where-Object { [string]$_.State -in @('Listen','Bound') -and $_.LocalAddress -in @('127.0.0.1','0.0.0.0') })
+}
+function Assert-PortBindable([string]$Name,[int]$Port) {
+    $listener=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,$Port)
+    try { $listener.Server.ExclusiveAddressUse=$true; $listener.Start() }
+    catch {
+        $failure=$_.Exception;$nativeCode='UNKNOWN'
+        while($failure){if($failure -is [Net.Sockets.SocketException]){$nativeCode=[string]$failure.NativeErrorCode;break};$failure=$failure.InnerException}
+        $reason=if($nativeCode -eq '10048'){'SERVICE_PORT_IN_USE'}elseif($nativeCode -eq '10013'){'SERVICE_PORT_DENIED'}else{'SERVICE_PORT_UNAVAILABLE'}
+        throw ($reason+' service='+$Name+' port='+$Port+' system='+$nativeCode)
+    } finally { $listener.Stop() }
+}
+function Test-ServiceReady([string]$Name,[int]$Port,[int]$ExpectedProcessId) {
+    $listeners=@(Get-PortBindings $Port | Where-Object { [string]$_.State -eq 'Listen' })
+    if(-not $listeners.Count){return $false}
+    $owners=@($listeners | Select-Object -ExpandProperty OwningProcess -Unique)
+    if(@($owners | Where-Object {[int]$_ -ne $ExpectedProcessId}).Count){throw ('SERVICE_PORT_OWNER_MISMATCH service='+$Name+' port='+$Port+' expectedPid='+$ExpectedProcessId+' owners='+($owners -join ','))}
+    if($Name -eq 'adapter'){
+        try{$health=Invoke-RestMethod -Uri ('http://127.0.0.1:'+$Port+'/status') -TimeoutSec 1}catch{return $false}
+        $healthPid=0
+        if(-not [int]::TryParse([string]$health.pid,[ref]$healthPid) -or $health.project -ne 'WeChatAgent' -or $health.component -ne 'adapter' -or $health.statusVersion -ne 1 -or $health.backend -ne 'wechat-hook' -or $healthPid -ne $ExpectedProcessId -or $health.projectRoot -isnot [string]){throw ('ADAPTER_IDENTITY_MISMATCH port='+$Port+' expectedPid='+$ExpectedProcessId)}
+        $sameRoot=$false;try{$sameRoot=[IO.Path]::GetFullPath($health.projectRoot).TrimEnd('\','/') -eq [IO.Path]::GetFullPath($root).TrimEnd('\','/')}catch{}
+        if(-not $sameRoot){throw ('ADAPTER_IDENTITY_MISMATCH port='+$Port+' expectedPid='+$ExpectedProcessId)}
+        return $health.ready -eq $true
+    }
+    return $true
+}
+function Start-ServiceProcess([string]$Name,[string]$Exe,[string]$Arguments,[string]$Directory,[string]$Marker,[int]$Port,[bool]$Visible) {
+    $bindings=@(Get-PortBindings $Port)
+    if($bindings.Count){
+        $item=$script:record[$Name];$existing=$null
+        try{$existing=Owned-Process $item}catch{}
+        $owners=@($bindings | Select-Object -ExpandProperty OwningProcess -Unique)
+        if(-not $existing -or @($owners | Where-Object {[int]$_ -ne [int]$item.pid}).Count){throw ('SERVICE_PORT_IN_USE service='+$Name+' port='+$Port+' owners='+($owners -join ','))}
+        $process=Get-Process -Id ([int]$item.pid) -ErrorAction Stop
+    }else{
+        # A failed connection does not prove the port can be bound. This
+        # preflight is advisory; the child listener and identity remain final.
+        Assert-PortBindable $Name $Port
+        $style = if ($Visible) { 'Normal' } else { 'Hidden' }
+        $process = Start-Process -FilePath $Exe -ArgumentList $Arguments -WorkingDirectory $Directory -WindowStyle $style -PassThru -RedirectStandardOutput (Join-Path $stateDir ('logs\'+$Name+'.stdout.log')) -RedirectStandardError (Join-Path $stateDir ('logs\'+$Name+'.stderr.log'))
+        $script:record[$Name] = @{pid=$process.Id;exe=$Exe;marker=$Marker}; Save-Record
+    }
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    do {
+        $process.Refresh()
         if ($process.HasExited) {
             $failureLog = Join-Path $stateDir ('logs\'+$Name+'.stderr.log')
             if (Test-Path -LiteralPath $failureLog) {
@@ -91,9 +133,10 @@ function Start-ServiceProcess([string]$Name,[string]$Exe,[string]$Arguments,[str
             }
             throw ($Name + ' exited; see state/logs/'+$Name+'.stderr.log')
         }
+        if(Test-ServiceReady $Name $Port ([int]$process.Id)){return}
         Start-Sleep -Milliseconds 250
-    }
-    if (-not (Test-Port $Port)) { throw ($Name + ' API not ready. Finish its setup in the opened window, then start again.') }
+    }while($watch.Elapsed.TotalSeconds -lt 20)
+    throw ('SERVICE_START_TIMEOUT service='+$Name+' port='+$Port+'. Finish its setup or restart this instance before retrying.')
 }
 function Show-Status($Config) {
     $hookSender = $Config.runtime.sender -eq 'wechat-hook'
@@ -174,9 +217,11 @@ try {
     }
     $env:SOCIAL_DSH_TOKEN = (Get-Content (Join-Path $stateDir 'social-dsh-token.txt') -Raw).Trim()
     $dshUrl = 'http://127.0.0.1:'+$config.ports.dshPlugin+'/health'
-    if (-not (Test-Port ([int]$config.ports.dshPlugin)) -and $config.runtime.dshDesktop -and (Test-Path -LiteralPath $config.runtime.dshDesktop)) {
+    if (-not (Test-Port ([int]$config.ports.dshPlugin))) {
+        if (-not $config.runtime.dshDesktop -or -not (Test-Path -LiteralPath $config.runtime.dshDesktop)) { throw 'DSH_NOT_CONFIGURED: Install DSH from the setup link, then select its executable and save settings.' }
         & (Join-Path $PSScriptRoot 'launch-dsh.ps1')
         for($i=0;$i -lt 60 -and -not (Test-Port ([int]$config.ports.dshPlugin));$i++){Start-Sleep -Milliseconds 250}
+        if (-not (Test-Port ([int]$config.ports.dshPlugin))) { throw 'DSH_PLUGIN_NOT_READY: Enable the local plugin in DSH and fully reopen DSH from the tray.' }
     }
     $health = Invoke-RestMethod $dshUrl -Headers @{Authorization='Bearer '+$env:SOCIAL_DSH_TOKEN} -TimeoutSec 3
     $accountIdentityFile = Join-Path $stateDir 'weflow\active-account.json'

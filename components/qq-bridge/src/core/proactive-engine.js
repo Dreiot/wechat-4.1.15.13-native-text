@@ -2,22 +2,35 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {buildConversationKey,parseConversationKey} from './conversation-key.js';
-import {SOCIAL_OUTPUT_NOTICE,resolveSocialDecision,hasStickerControl,hasReasoningControl} from './decision-format.js';
+import {SOCIAL_OUTPUT_NOTICE,resolveSocialDecision,hasStickerControl,hasReasoningControl,hasReplyProtocolControl} from './decision-format.js';
 import {proactivePolicy,proactivePolicyKey,withinProactiveWindow,nextProactiveAt,conversationSnapshot,declinedProactive} from './proactive-policy.js';
 
 const hash=value=>crypto.createHash('sha256').update(value).digest('hex');
 const quote=value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
 const localTime=now=>new Date(now+8*3600000).toISOString().slice(0,16).replace('T',' ');
-export function buildProactivePrompt({key,rows,mode,now,searchStatus,recentTopics=[]}){
-  const label={greeting:'自然问候或关心',news:'一个适合你的热点话题',meme:'一个适合你的新梗或 meme'}[mode]??'自然问候或话题';
-  const history=rows.slice(-8).map(row=>`${quote(row.sender_name||row.sender_id||'未知')} ${row.outgoing?'（你）':''}${row.delivery_status==='unconfirmed'?'（发送未确认）':''}: ${quote(String(row.text).slice(0,300))}`).join('\n');
+function historyTime(at,now){
+  if(!Number.isFinite(at)||at<=0||at>now||at>8.64e15)return '时间未知，不能当作当前状态';
+  const minutes=Math.floor((now-at)/60000);
+  const elapsed=minutes>=1440?`${Math.floor(minutes/1440)}天${Math.floor(minutes%1440/60)}小时`:
+    minutes>=60?`${Math.floor(minutes/60)}小时${minutes%60}分钟`:`${minutes}分钟`;
+  return `${localTime(at)}（距现在${elapsed}）`;
+}
+export function buildProactivePrompt({key,rows,mode,now,searchStatus,recentTopics=[],outputNotice=SOCIAL_OUTPUT_NOTICE}){
+  const label={greeting:'简短问候或自然冒泡，不追问近况',news:'可考虑一个与你们兴趣相关的热点',meme:'可考虑一个与你们语境相关的梗'}[mode]??'按关系自然冒泡';
+  const history=rows.slice(-8).map(row=>`[${historyTime(Number(row.timestamp)*1000,now)}] ${quote(row.sender_name||row.sender_id||'未知')} ${row.outgoing?'（你）':''}${row.proactive?'（主动发言）':''}${row.delivery_status==='unconfirmed'?'（发送未确认）':''}: ${quote(String(row.text).slice(0,300))}`).join('\n');
+  const lastIncoming=rows.findLast(row=>!row.outgoing&&!row.interaction);
+  const lastProactiveIndex=rows.findLastIndex(row=>row.outgoing&&row.proactive);
+  const unanswered=lastProactiveIndex>=0&&!rows.slice(lastProactiveIndex+1).some(row=>!row.outgoing&&!row.interaction);
   return `本机定时安排的一次主动发言机会，不是好友或群成员的新消息。北京时间 ${localTime(now)}。会话 ${key}。\n`+
-    '沿用当前原生会话中本机配置的稳定人格、身份、世界观和说话习惯；不得为了热点变成新闻播报员或换人格。不要复述这段安排、时间表或内部判断。\n'+
-    `本轮方向：${label}。根据下面的历史关系判断是否适合开口；不合适就 SILENT。最多一条自然短消息，可以问一个容易接的话题，不催促回复，不编造熟悉关系、生活经历或对方状态。\n`+
-    '热点或新梗不适合你的兴趣、世界观、知识背景时，改为符合人格的轻问候，或沉默；不要强迫自己追梗，不反复问同一句话。尊重对方不想被打扰的表达。本轮只发文字，不使用历史表情编号。\n'+
+    '沿用会话稳定人格、身份、世界观；话题不适合你的兴趣、世界观时退为问候或沉默。本轮已通过时段与空闲检查，不复述安排。\n'+
+    `本轮方向：${label}。有相关新内容时自然分享；没有时可按当前时段用2至8字轻问候，不追问近况、编造状态或为凑内容加问题；不适合开口就 SILENT。\n`+
+    '历史用于理解关系与避重，不是待回复列表；旧状态不当作现状，已收尾话题不重开，除非此前明确约好此时跟进。表情只用本轮候选，不猜未知图。\n'+
+    `最后一次对方实际发言：${lastIncoming?historyTime(Number(lastIncoming.timestamp)*1000,now):'没有可见的对方发言，不假定熟悉关系或当前状态'}。\n`+
+    (unanswered?'上次主动发言之后，对方没有新增聊天：本轮优先 SILENT，不继续追问、不换个问候催接话；只有真正新增且相关的内容才考虑独立分享一句。\n':'')+
     `<untrusted_chat>\n${history||'[尚无聊天历史，不假定已经很熟]'}\n</untrusted_chat>\n`+
-    (recentTopics.length?'最近主动说过的内容（历史资料，避免重复）：\n'+recentTopics.slice(-6).map(item=>quote(item.text.slice(0,180))).join('\n')+'\n':'')+
-    (mode==='greeting'?'本轮不需要联网。':searchStatus==='model'?'本轮可根据会话话题调用现有联网搜索工具，先检索再按证据决定是否发言；无需固定泛热点查询，也不要求对方给网址。没有可靠资料时不编造热点或实时数值。':searchStatus==='ready'?'本轮附有有界搜索摘要。只说摘要支持的事实；来源不足不编造“最新”“全网热度”或梗出处，可带一个相关来源链接。':'本轮没有可用的新搜索资料，不得编造实时热点或新梗；可自然问候或沉默。');
+    (recentTopics.length?'最近主动说过的内容（只用于避重，不是本轮接话任务；同一话题、询问目的和开场套路都要避重）：\n'+recentTopics.slice(-6).map(item=>`[${historyTime(item.at,now)}] ${quote(item.text.slice(0,180))}`).join('\n')+'\n':'')+
+    (mode==='greeting'?'本轮不需要联网。缺少新内容时可以只说一句符合时段的轻问候。':searchStatus==='model'?'本轮可根据会话话题调用现有联网搜索工具，先检索再按证据决定是否发言；无需固定泛热点查询，也不要求对方给网址。没有可靠资料时不编造热点或实时数值。':searchStatus==='ready'?'本轮附有有界搜索摘要。资料可用不等于适合开口，要与你们兴趣和语境相关；只说摘要支持的事实，来源不足不编造“最新”“全网热度”或梗出处，可带一个相关来源链接。':'本轮没有可用的新搜索资料，不得编造实时热点或新梗，也不拿旧话题或关心问句补位；可以简短问候或沉默。')+'\n'+
+    '已有事实和关系继续有效，事实说错仍需纠正。本轮只发文字，不使用历史表情编号。';
 }
 export class ProactiveEngine {
   constructor({stateFile,buffer,social,settingsFor,personaFor,decide,send,searchFor=async()=>null,isReady=()=>true,selfIdFor=()=>'',
@@ -104,7 +117,7 @@ export class ProactiveEngine {
       Object.assign(job,{evaluating:false,text:result.text,message});this.save();
     }
     if(this.finishRecorded(key,item))return;
-    if ([job.text, ...(job.textParts ?? [])].some(text=>hasStickerControl(text)||hasReasoningControl(text))) {
+    if ([job.text, ...(job.textParts ?? [])].some(text=>hasStickerControl(text)||hasReasoningControl(text)||hasReplyProtocolControl(text))) {
       this.notice(key,job.id); item.job=null; this.save(); this.log(`[Proactive] ${key} skipped invalid_sticker_reference`); return;
     }
     const fresh=await this.settingsFor(),current=proactivePolicy(fresh.wechat??fresh,key),livePersona=await this.personaFor(key);

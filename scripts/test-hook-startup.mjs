@@ -19,10 +19,16 @@ test('missing initialization has a bounded, actionable startup error',async t=>{
  assert.match(taskFailureMessage('HOOK_INITIALIZATION_TIMEOUT',1),/hook-init.log/);
 });
 test('authentication, invalid response, version and account failures are not hidden by retries',async t=>{
- for(const [payload,expected]of [[new Response('{}',{status:401}),/API_HTTP_401/],[new Response('not json'),/HOOK_HEALTH_INVALID_RESPONSE/],[{version:'4.1.9.0'},/HOOK_VERSION_MISMATCH/],[{databaseAccounts:[]},/HOOK_LOGIN_REQUIRED/],[{databaseAccounts:['other']},/HOOK_ACCOUNT_NOT_READY/]]){
+ for(const [payload,expected]of [[new Response('{}',{status:401}),/API_HTTP_401/],[new Response('not json'),/HOOK_HEALTH_INVALID_RESPONSE/],[{version:'4.1.9.0'},/HOOK_VERSION_MISMATCH/],[{databaseAccounts:['other']},/HOOK_ACCOUNT_MISMATCH/],[{databaseAccounts:['old','wxid_fixture']},/HOOK_MULTIPLE_ACCOUNT_DATABASES/]]){
   let calls=0;const adapter=fixture(t,async healthy=>{calls++;return payload instanceof Response?payload:new Response(JSON.stringify({...healthy,...payload}));});
   await assert.rejects(adapter.waitForNative({timeoutMs:100,intervalMs:1}),expected);assert.equal(calls,1);
  }
+});
+
+test('startup waits for login without accepting a wrong or ambiguous account',async t=>{
+ let calls=0;const adapter=fixture(t,async healthy=>new Response(JSON.stringify({...healthy,databaseAccounts:++calls<3?[]:healthy.databaseAccounts})));
+ await adapter.waitForNative({timeoutMs:200,intervalMs:1});assert.equal(calls,3);assert.equal(adapter.status.hook_account_verified,true);
+ const pending=fixture(t,async healthy=>new Response(JSON.stringify({...healthy,databaseAccounts:[]})));await assert.rejects(pending.waitForNative({timeoutMs:5,intervalMs:1}),/HOOK_LOGIN_REQUIRED/);assert.equal(pending.status.hook_account_verified,false);
 });
 test('login and repair messages distinguish a healthy client without an account from a failed sender',()=>{
  assert.match(taskFailureMessage('HOOK_LOGIN_REQUIRED',1),/完成登录/);
